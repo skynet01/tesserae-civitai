@@ -54,19 +54,69 @@ def test_drawing_style_uses_verified_image_tag_without_discovery(
     assert parse_qs(urlsplit(calls[0]).query)["tags"] == ["81"]
 
 
-def test_declared_network_access_allows_the_guarded_transport_pinned_ip(monkeypatch):
+def test_domain_transport_runs_under_host_scope_and_denies_other_targets(
+    server, monkeypatch
+):
+    import io
+    import socket
+    import ssl
+    from types import SimpleNamespace
     from app import capabilities
 
-    manifest = json.loads((Path(__file__).parents[1] / "plugin.json").read_text())
-    caps = capabilities.parse("picture_civitai", manifest["requires"])
+    addresses = []
+    payload = b'{"items":[]}'
+
+    class Socket:
+        def setsockopt(self, *args):
+            pass
+
+        def settimeout(self, value):
+            assert value <= 2
+
+        def sendall(self, request):
+            assert b"Host: civitai.com" in request
+
+        def makefile(self, mode):
+            stream = io.BytesIO(
+                b"HTTP/1.1 200 OK\r\nContent-Length: 12\r\n\r\n" + payload
+            )
+            stream.raw = SimpleNamespace(_sock=self)
+            return stream
+
+        def close(self):
+            pass
+
+    def connect(address, *args, **kwargs):
+        addresses.append(address)
+        return Socket()
+
+    def wrap(context, sock, *, server_hostname, **kwargs):
+        assert server_hostname == "civitai.com"
+        assert context.verify_mode == ssl.CERT_REQUIRED
+        assert context.check_hostname is True
+        return sock
+
+    monkeypatch.setattr(capabilities, "_original_create_connection", connect)
     monkeypatch.setattr(
-        capabilities, "_original_create_connection", lambda address: address
+        socket, "create_connection", capabilities._hooked_create_connection
+    )
+    monkeypatch.setattr(
+        socket,
+        "getaddrinfo",
+        lambda *a, **kw: [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("172.66.152.186", 443))
+        ],
+    )
+    monkeypatch.setattr(ssl.SSLContext, "wrap_socket", wrap)
+    caps = capabilities.parse(
+        "picture_civitai", ["network:civitai.com", "network:image.civitai.com"]
     )
     with capabilities.capability_scope(caps):
-        assert capabilities._hooked_create_connection(("172.66.152.186", 443)) == (
-            "172.66.152.186",
-            443,
-        )
+        assert server.fetch_json("https://civitai.com/api/v1/images") == {"items": []}
+        for target in ("172.66.152.186", "example.com"):
+            with pytest.raises(capabilities.CapabilityDenied):
+                capabilities._hooked_create_connection((target, 443))
+    assert addresses == [("civitai.com", 443)]
 
 
 def fake_network(monkeypatch, server, callback):
@@ -707,9 +757,7 @@ def test_guarded_stream_read_deadline_releases_lock_for_another_collection(
             opened.append((request, timeout))
             return Response()
 
-    monkeypatch.setattr(
-        server, "guarded_opener", lambda **kwargs: Opener(), raising=False
-    )
+    monkeypatch.setattr(server, "_api_opener", lambda **kwargs: Opener(), raising=False)
     ctx = {"data_dir": str(tmp_path)}
     failed = server.fetch({}, {"api_key_secret": "private-key"}, ctx=ctx)
     assert failed["images"] == []
@@ -726,14 +774,25 @@ def test_guarded_stream_read_deadline_releases_lock_for_another_collection(
     assert server.fetch({"period": "Day"}, {}, ctx=ctx)["images"]
 
 
-def test_json_transport_refuses_other_hosts_before_opening(server, monkeypatch):
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://example.com/api/v1/images",
+        "https://172.66.152.186/api/v1/images",
+        "http://civitai.com/api/v1/images",
+        "https://civitai.com:444/api/v1/images",
+        "https://user@civitai.com/api/v1/images",
+        "https://civitai.com/unsupported",
+    ],
+)
+def test_json_transport_refuses_other_hosts_before_opening(server, monkeypatch, url):
     def unexpected(**kwargs):
         pytest.fail("An arbitrary URL reached the network opener")
 
-    monkeypatch.setattr(server, "guarded_opener", unexpected, raising=False)
+    monkeypatch.setattr(server, "_api_opener", unexpected, raising=False)
     with pytest.raises(ValueError):
         server.fetch_json(
-            "https://example.com/api/v1/images",
+            url,
             headers={"Authorization": "Bearer private-key"},
         )
 
@@ -770,7 +829,7 @@ def test_guarded_json_transport_handles_eof_and_enforces_two_mib_cap(
 
     response = Response()
     opener = SimpleNamespace(open=lambda *args, **kwargs: response)
-    monkeypatch.setattr(server, "guarded_opener", lambda **kwargs: opener)
+    monkeypatch.setattr(server, "_api_opener", lambda **kwargs: opener, raising=False)
     if oversized:
         with pytest.raises(ValueError, match="byte cap"):
             server.fetch_json("https://civitai.com/api/v1/images")

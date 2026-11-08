@@ -19,8 +19,6 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode, urlsplit
 
-from app.net_guard import guarded_opener
-
 API_URL = "https://civitai.com/api/v1/images"
 TAG_URL = "https://civitai.com/api/trpc/tag.getAll"
 MAX_IMAGES = 100
@@ -60,6 +58,15 @@ class _ApiRedirect(urllib.request.HTTPRedirectHandler):
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
+def _api_opener() -> urllib.request.OpenerDirector:
+    """Keep the literal hostname visible to Tesserae's domain capability hook."""
+    return urllib.request.build_opener(
+        urllib.request.ProxyHandler({}),
+        urllib.request.HTTPSHandler(),
+        _ApiRedirect(),
+    )
+
+
 def fetch_json(
     url: str,
     *,
@@ -67,7 +74,7 @@ def fetch_json(
     timeout: float = 2,
     max_bytes: int = MAX_CACHE_BYTES,
 ) -> Any:
-    """Pinned, checked API transport with a total body deadline and byte cap.
+    """Fixed-domain HTTPS transport with a total body deadline and byte cap.
 
     DNS/connect are still subject to the operating system's timing; fetch()'s
     caller wait is bounded independently. read1 avoids a continuously streaming
@@ -81,7 +88,7 @@ def fetch_json(
         raise ValueError("Invalid Civitai network limits")
     deadline = time.monotonic() + timeout
     request = urllib.request.Request(url, headers=headers or {})
-    opener = guarded_opener(redirects=_ApiRedirect())
+    opener = _api_opener()
     with opener.open(request, timeout=timeout) as response:
         body = bytearray()
         while True:
@@ -90,7 +97,7 @@ def fetch_json(
                 raise TimeoutError("Civitai response deadline exceeded")
             if getattr(response, "isclosed", lambda: False)():
                 break
-            # urllib's pinned HTTPS response wraps its socket in SocketIO.
+            # urllib's HTTPS response wraps its socket in SocketIO.
             sock = getattr(
                 getattr(getattr(response, "fp", None), "raw", None), "_sock", None
             )

@@ -26,7 +26,7 @@ For full positive tag-name lookup, create a free personal API key at [Civitai ac
 
 Only public images marked SFW by Civitai are requested. Filtering depends on Civitai's metadata; it does not inspect image contents. Candidate collection is bounded, so narrow combinations can have no matches even when matching images exist elsewhere on Civitai.
 
-The manifest declares `network:*` because Tesserae's checked downloader connects to pinned public IP addresses, which its domain-only capability declarations reject. The widget still accepts only the two fixed HTTPS API paths on `civitai.com`, rejects redirects outside them, and validates image URLs against `image.civitai.com`. Private-address and DNS-rebinding protection remain active.
+The manifest limits network access to `civitai.com` and `image.civitai.com`. The widget accepts only its two fixed HTTPS API paths, rejects redirects outside them, and validates image URLs against the image CDN. Downloads use normal TLS verification and enforce response deadlines and size limits.
 
 ## Orientation and image size
 
