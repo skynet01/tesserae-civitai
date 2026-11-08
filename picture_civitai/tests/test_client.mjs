@@ -169,3 +169,125 @@ test("the default fills the cell and assesses resolution for the full image crop
   await render(shadow, { cell: landscape, data: { images: [image(2, 2400, 1600)] } });
   assert.match(shadow.innerHTML, /object-fit:cover/);
 });
+
+function imageShadow(outcomes) {
+  let html = "";
+  let current;
+  const attempts = [];
+  return {
+    attempts,
+    get innerHTML() { return html; },
+    set innerHTML(value) {
+      html = value;
+      const src = value.match(/<img src="([^"]+)"/);
+      if (!src) { current = undefined; return; }
+      const loaded = outcomes[attempts.length] === true;
+      attempts.push(src[1]);
+      current = { complete: true, naturalWidth: loaded ? 2400 : 0,
+        addEventListener() {}, removeEventListener() {}, async decode() {} };
+    },
+    querySelector() { return current; },
+  };
+}
+
+test("original CDN URLs use the actual source width without requesting an upscale", async () => {
+  const shadow = imageShadow([true]);
+  await render(shadow, { cell: landscape, data: { images: [image(1, 1024, 680, {
+    url: "https://image.civitai.com/token/asset/original=true/painting.png",
+  })] } });
+  assert.deepEqual(shadow.attempts, ["https://image.civitai.com/token/asset/width=1024/painting.png"]);
+});
+
+test("a failed cached image retries another eligible image and keeps a successful result", async () => {
+  const shadow = imageShadow([false, true]);
+  await render(shadow, { cell: landscape, data: { images: [image(1, 2400, 1600), image(2, 2400, 1600)] } });
+  assert.equal(shadow.attempts.length, 2);
+  assert.equal(new Set(shadow.attempts).size, 2);
+  assert.match(shadow.innerHTML, /<img /);
+  assert.doesNotMatch(shadow.innerHTML, /could not be loaded/);
+});
+
+test("three failed cached images stop with a friendly load failure", async () => {
+  const shadow = imageShadow([false, false, false, true]);
+  await render(shadow, { cell: landscape, data: {
+    images: [1, 2, 3, 4].map(id => image(id, 2400, 1600)),
+  } });
+  assert.equal(shadow.attempts.length, 3);
+  assert.equal(new Set(shadow.attempts).size, 3);
+  assert.doesNotMatch(shadow.innerHTML, /<img /);
+  assert.match(shadow.innerHTML, /could not be loaded/);
+});
+
+test("load fallback cannot choose a wrong orientation or below-native image", async () => {
+  const shadow = imageShadow([false, true]);
+  await render(shadow, {
+    cell: { ...landscape, options: { resolution: "native_only" } },
+    data: { images: [image(1, 2400, 1600), image(2, 1800, 2400), image(3, 800, 600)] },
+  });
+  assert.deepEqual(shadow.attempts, ["https://image.civitai.com/test/1.jpeg"]);
+  assert.match(shadow.innerHTML, /could not be loaded/);
+});
+
+test("an old failed render cannot retry over a fresh successful render", async () => {
+  let failOld;
+  let html = "";
+  let current;
+  const attempts = [];
+  const shadow = {
+    get innerHTML() { return html; },
+    set innerHTML(value) {
+      html = value;
+      const src = value.match(/<img src="([^"]+)"/);
+      if (!src) { current = undefined; return; }
+      attempts.push(src[1]);
+      const old = attempts.length === 1;
+      current = { complete: !old, naturalWidth: old ? 0 : 2400,
+        addEventListener(event, callback) { if (old && event === "error") failOld = callback; },
+        removeEventListener() {}, async decode() {} };
+    },
+    querySelector() { return current; },
+  };
+  const old = render(shadow, { cell: landscape, data: { images: [image(1, 2400, 1600), image(2, 2400, 1600)] } });
+  await render(shadow, { cell: landscape, data: { images: [image(99, 2400, 1600)] } });
+  failOld();
+  await old;
+  assert.equal(attempts.length, 2);
+  assert.match(shadow.innerHTML, /test\/99.jpeg/);
+});
+
+test("three slow attempts share a total twelve-second load budget", async t => {
+  let elapsed = 0;
+  const timers = [];
+  const delays = [];
+  t.mock.method(Date, "now", () => elapsed);
+  t.mock.method(globalThis, "setTimeout", (callback, delay) => {
+    timers.push(callback);
+    delays.push(delay);
+    return delays.length;
+  });
+  t.mock.method(globalThis, "clearTimeout", () => {});
+  let html = "";
+  let current;
+  const shadow = {
+    get innerHTML() { return html; },
+    set innerHTML(value) {
+      html = value;
+      current = value.includes("<img ")
+        ? { complete: false, naturalWidth: 0, addEventListener() {}, removeEventListener() {} }
+        : undefined;
+    },
+    querySelector() { return current; },
+  };
+  const pending = render(shadow, { cell: landscape, data: {
+    images: [1, 2, 3, 4].map(id => image(id, 2400, 1600)),
+  } });
+  for (let attempt = 0; attempt < 3 && timers.length; attempt++) {
+    elapsed += delays[attempt];
+    timers.shift()();
+    await new Promise(setImmediate);
+  }
+  await pending;
+  assert.deepEqual(delays, [4000, 4000, 4000]);
+  assert.equal(elapsed, 12000);
+  assert.match(shadow.innerHTML, /could not be loaded/);
+});

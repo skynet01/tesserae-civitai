@@ -65,7 +65,7 @@ export function selectImage(images, cell, options = {}, runtime = {}) {
   return pool[index];
 }
 
-function waitForImage(image) {
+function waitForImage(image, timeout) {
   return new Promise(resolve => {
     let settled = false;
     const finish = ready => {
@@ -85,7 +85,7 @@ function waitForImage(image) {
         finish(false);
       }
     };
-    const timer = setTimeout(() => finish(false), 12000);
+    const timer = setTimeout(() => finish(false), timeout);
     image.addEventListener("load", onLoad, { once: true });
     image.addEventListener("error", onError, { once: true });
     if (image.complete) {
@@ -95,15 +95,31 @@ function waitForImage(image) {
   });
 }
 
+function imageUrl(image) {
+  if (!allowedUrl(image.url, "image.civitai.com")) return "";
+  const url = new URL(image.url);
+  if (!url.pathname.includes("/original=true/")) return image.url;
+  url.pathname = url.pathname.replace("/original=true/", `/width=${Math.round(Number(image.width))}/`);
+  return url.href;
+}
+
+const activeRenders = new WeakMap();
+
 export default async function render(shadow, ctx = {}) {
+  const token = {};
+  activeRenders.set(shadow, token);
+  const started = Date.now();
   const data = ctx.data ?? {};
   const options = ctx.cell?.options ?? {};
   const target = [data.target_w, data.target_h].map(Number);
   const cell = target.every(value => Number.isFinite(value) && value > 0)
     ? { w: target[0], h: target[1] } : ctx.cell;
-  const image = selectImage(data.images, cell, options, {
+  const runtime = {
     placementId: data.placement_id ?? ctx.placement_id ?? ctx.cell?.id ?? "",
-  });
+    now: started,
+  };
+  let pool = Array.isArray(data.images) ? data.images : [];
+  let image = selectImage(pool, cell, options, runtime);
   const css = `<link rel="stylesheet" href="/static/style/spectra-widgets.css">
     <link rel="stylesheet" href="/plugins/picture_civitai/client.css">`;
 
@@ -117,21 +133,30 @@ export default async function render(shadow, ctx = {}) {
     return;
   }
 
-  const credit = image.username ? `Civitai / ${image.username}` : "Civitai";
-  const permalink = allowedUrl(image.permalink, "civitai.com")
-    && /^\/images\/\d+\/?$/.test(new URL(image.permalink).pathname) ? image.permalink : "";
-  const creditText = escapeHtml(credit);
-  const creditHtml = permalink
-    ? `<a href="${escapeHtml(permalink)}" target="_blank" rel="noopener noreferrer">${creditText}</a>`
-    : creditText;
-  shadow.innerHTML = `${css}
-    <div class="w is-bleed" data-widget="picture_civitai">
-      <img src="${escapeHtml(image.url)}" alt="${escapeHtml(image.username ? `Artwork by ${image.username}` : "Civitai artwork")}" style="object-fit:${options.scale === "fit" ? "contain" : "cover"};">
-      ${options.show_credit !== false ? `<div class="img-overlay"><span class="sub">${creditHtml}</span></div>` : ""}
-    </div>`;
-  const element = shadow.querySelector?.("img");
-  if (element && !await waitForImage(element) && shadow.querySelector("img") === element) {
-    shadow.innerHTML = `${css}<div class="w is-bleed" data-widget="picture_civitai">
-      <div class="bleed-empty">The Civitai image could not be loaded. Try refreshing this widget.</div></div>`;
+  for (let attempt = 0; image && attempt < 3; attempt++) {
+    const remaining = 12000 - (Date.now() - started);
+    if (remaining <= 0) break;
+    const credit = image.username ? `Civitai / ${image.username}` : "Civitai";
+    const permalink = allowedUrl(image.permalink, "civitai.com")
+      && /^\/images\/\d+\/?$/.test(new URL(image.permalink).pathname) ? image.permalink : "";
+    const creditText = escapeHtml(credit);
+    const creditHtml = permalink
+      ? `<a href="${escapeHtml(permalink)}" target="_blank" rel="noopener noreferrer">${creditText}</a>`
+      : creditText;
+    shadow.innerHTML = `${css}
+      <div class="w is-bleed" data-widget="picture_civitai">
+        <img src="${escapeHtml(imageUrl(image))}" alt="${escapeHtml(image.username ? `Artwork by ${image.username}` : "Civitai artwork")}" style="object-fit:${options.scale === "fit" ? "contain" : "cover"};">
+        ${options.show_credit !== false ? `<div class="img-overlay"><span class="sub">${creditHtml}</span></div>` : ""}
+      </div>`;
+    const element = shadow.querySelector?.("img");
+    if (!element) return;
+    const loaded = await waitForImage(element, Math.max(0, Math.min(4000, 12000 - (Date.now() - started))));
+    if (activeRenders.get(shadow) !== token || shadow.querySelector("img") !== element) return;
+    if (loaded) return;
+    const failed = String(image.id ?? image.url);
+    pool = pool.filter(candidate => candidate && String(candidate.id ?? candidate.url) !== failed);
+    image = selectImage(pool, cell, options, runtime);
   }
+  shadow.innerHTML = `${css}<div class="w is-bleed" data-widget="picture_civitai">
+    <div class="bleed-empty">The Civitai image could not be loaded. Try refreshing this widget.</div></div>`;
 }
