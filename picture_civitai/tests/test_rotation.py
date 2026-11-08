@@ -291,3 +291,31 @@ def test_concurrent_placements_do_not_lose_each_others_history(rotation, monkeyp
         assert list(executor.map(select, range(20))) == [1] * 20
     state = json.loads((Path(ctx["data_dir"]) / "civitai-history.json").read_text())
     assert len(state["placements"]) == 20
+
+
+def test_delayed_request_cannot_rewind_a_newer_bucket_selection(rotation, monkeypatch):
+    server, clock, _, choose = rotation
+    assert choose([image(1)])["selected_id"] == 1
+    images = [image(1), image(2), image(3)]
+    original_lock = server._HIST_LOCK
+    newer = []
+
+    class InterleavedLock:
+        first_entry = True
+
+        def __enter__(self):
+            if self.first_entry:
+                self.first_entry = False
+                # The older request reaches the lock, then a request in the
+                # next bucket acquires it and writes history before it does.
+                clock[0] += 3600
+                newer.append(choose(images)["selected_id"])
+            original_lock.acquire()
+
+        def __exit__(self, *args):
+            original_lock.release()
+
+    monkeypatch.setattr(server, "_HIST_LOCK", InterleavedLock())
+    delayed = choose(images)["selected_id"]
+    assert delayed == newer[0]
+    assert choose(images)["selected_id"] == newer[0]

@@ -523,18 +523,20 @@ def _select_rotation(
     pool = _rotation_candidates(result.get("images"), options, width, height)
     if not pool:
         return result
-    now = time.time()
-    try:
-        minutes = float(options.get("rotation_minutes", 60))
-        interval = minutes * 60
-        if not math.isfinite(interval) or interval <= 0:
-            interval = 3600
-    except (TypeError, ValueError, OverflowError):
-        interval = 3600
-    bucket = f"{interval}:{math.floor(now / interval)}"
     key = hashlib.sha256(str(placement).encode()).hexdigest()
     path = Path(ctx["data_dir"]) / "civitai-history.json"
     with _HIST_LOCK:
+        # Capture time after acquiring the lock: a waiting request must not
+        # overwrite a newer bucket with the timestamp from before it waited.
+        now = time.time()
+        try:
+            minutes = float(options.get("rotation_minutes", 60))
+            interval = minutes * 60
+            if not math.isfinite(interval) or interval <= 0:
+                interval = 3600
+        except (TypeError, ValueError, OverflowError):
+            interval = 3600
+        bucket = f"{interval}:{math.floor(now / interval)}"
         records = _read_history(path)
         record = records.get(key, {})
         if record.get("bucket") == bucket:
