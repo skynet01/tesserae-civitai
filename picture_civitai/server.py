@@ -15,6 +15,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode, urlsplit
@@ -29,7 +30,10 @@ STYLE_TAG_IDS = {"drawing": 81, "illustration": 5145, "painting": 7660}
 MAX_CALLS = 16
 MAX_IMAGE_CALLS = 8
 MAX_CACHE_BYTES = 2 * 1024 * 1024
+REACTION_FIELDS = ("cryCount", "laughCount", "likeCount", "heartCount")
+STAT_FIELDS = (*REACTION_FIELDS, "commentCount")
 _LOCK = threading.Lock()
+_HIST_LOCK = threading.Lock()
 
 
 class FeedError(ValueError):
@@ -130,6 +134,39 @@ def _integer(value: Any) -> bool:
     return type(value) is int and 0 < value <= 2**53 - 1
 
 
+def _minimum(value: Any, label: str) -> int:
+    message = f"Choose a minimum {label} count from 0 to 1000000000, in whole numbers."
+    if type(value) is int:
+        if 0 <= value <= 1_000_000_000:
+            return value
+        raise FeedError(message)
+    if type(value) not in (float, str) or len(str(value)) > 100:
+        raise FeedError(message)
+    if isinstance(value, str) and "_" in value:
+        raise FeedError(message)
+    try:
+        number = Decimal(str(value).strip())
+    except InvalidOperation:
+        raise FeedError(message) from None
+    if (
+        not number.is_finite()
+        or not 0 <= number <= 1_000_000_000
+        or number != number.to_integral_value()
+    ):
+        raise FeedError(message)
+    return int(number)
+
+
+def _stats(raw: Any) -> dict[str, int]:
+    if not isinstance(raw, dict):
+        return {}
+    return {
+        field: raw[field]
+        for field in STAT_FIELDS
+        if type(raw.get(field)) is int and 0 <= raw[field] <= 2**53 - 1
+    }
+
+
 def _image_url(value: Any) -> bool:
     if (
         not isinstance(value, str)
@@ -192,7 +229,7 @@ def _image(entry: Any) -> dict[str, Any] | None:
     ):
         return None
     username = entry.get("username")
-    return {
+    clean = {
         "id": entry["id"],
         "url": entry["url"],
         "width": entry["width"],
@@ -200,7 +237,14 @@ def _image(entry: Any) -> dict[str, Any] | None:
         "username": username[:100] if isinstance(username, str) else "",
         "permalink": f"https://civitai.com/images/{entry['id']}",
         "tags": _tags(entry.get("tags")),
+        "source_priority": 0
+        if type(entry.get("source_priority")) is int and entry["source_priority"] == 0
+        else 1,
     }
+    stats = _stats(entry.get("stats"))
+    if stats:
+        clean["stats"] = stats
+    return clean
 
 
 def _load(path: Path) -> dict[str, Any]:
@@ -289,6 +333,250 @@ def _cached_images(record: dict[str, Any]) -> list[dict[str, Any]]:
 def fetch(
     options: dict[str, Any], settings: dict[str, Any], *, ctx: dict[str, Any]
 ) -> dict[str, Any]:
+    """Apply placement minimums and durable rotation to the shared image pool."""
+    try:
+        reactions = _minimum(options.get("min_reactions", 0), "reactions")
+        comments = _minimum(options.get("min_comments", 0), "comments")
+    except FeedError as err:
+        return {"images": [], "error": str(err)}
+    try:
+        repeat_days = _minimum(options.get("repeat_days", 7), "repeat days")
+        if repeat_days > 30:
+            raise FeedError("Repeat period is too long.")
+    except FeedError:
+        return {
+            "images": [],
+            "error": "Choose a repeat avoidance period from 0 to 30 days, in whole numbers.",
+        }
+    result = _fetch_pool(options, settings, ctx=ctx)
+    if reactions or comments:
+        images = result["images"]
+        filtered = []
+        for candidate in images:
+            stats = candidate.get("stats", {})
+            if reactions and (
+                not all(field in stats for field in REACTION_FIELDS)
+                or sum(stats[field] for field in REACTION_FIELDS) < reactions
+            ):
+                continue
+            if comments and stats.get("commentCount", -1) < comments:
+                continue
+            filtered.append(candidate)
+        result = {
+            **result,
+            "images": filtered,
+            **(
+                {
+                    "error": "No cached images meet the minimum reactions and comments. Lower the minimums or wait for the collection to refresh."
+                }
+                if images and not filtered
+                else {}
+            ),
+        }
+    return _select_rotation(result, options, ctx, repeat_days)
+
+
+def _rotation_candidates(
+    images: Any, options: dict[str, Any], width: int, height: int
+) -> list[dict[str, Any]]:
+    """Mirror client eligibility before history or creator preferences apply."""
+
+    def shape(w: int, h: int) -> str:
+        return "landscape" if w > h else "portrait" if w < h else "square"
+
+    orientation = options.get("orientation")
+    if orientation not in ("landscape", "portrait", "any"):
+        orientation = shape(width, height)
+    pool = {}
+    for image in images if isinstance(images, list) else []:
+        if (
+            not isinstance(image, dict)
+            or not _integer(image.get("id"))
+            or not _integer(image.get("width"))
+            or not _integer(image.get("height"))
+            or not _image_url(image.get("url"))
+        ):
+            continue
+        if (
+            orientation != "any"
+            and shape(image["width"], image["height"]) != orientation
+        ):
+            continue
+        pool.setdefault(str(image["id"]), image)
+    candidates = list(pool.values())
+    if options.get("resolution") != "allow_smaller":
+        scale = min if options.get("scale") == "fit" else max
+        native = [
+            image
+            for image in candidates
+            if scale(width / image["width"], height / image["height"]) <= 1
+        ]
+        if native or options.get("resolution") == "native_only":
+            candidates = native
+    return candidates
+
+
+def _history_time(value: Any) -> bool:
+    return (
+        type(value) in (int, float) and 0 <= value <= 2**53 - 1 and math.isfinite(value)
+    )
+
+
+def _history_id(value: Any) -> bool:
+    return (
+        isinstance(value, str)
+        and re.fullmatch(r"[1-9][0-9]{0,15}", value) is not None
+        and int(value) <= 2**53 - 1
+    )
+
+
+def _read_history(path: Path) -> dict[str, Any]:
+    try:
+        with path.open("rb") as handle:
+            raw = handle.read(1024 * 1024 + 1)
+        if len(raw) > 1024 * 1024:
+            return {}
+        data = json.loads(raw)
+        records = data.get("placements") if isinstance(data, dict) else None
+        if not isinstance(records, dict):
+            return {}
+        cleaned = {}
+        for key, record in records.items():
+            if (
+                not isinstance(key, str)
+                or re.fullmatch(r"[0-9a-f]{64}", key) is None
+                or not isinstance(record, dict)
+                or not _history_time(record.get("updated"))
+            ):
+                continue
+            seen = record.get("seen")
+            seen = (
+                {
+                    ident: timestamp
+                    for ident, timestamp in seen.items()
+                    if _history_id(ident) and _history_time(timestamp)
+                }
+                if isinstance(seen, dict)
+                else {}
+            )
+            cleaned[key] = {
+                "updated": record["updated"],
+                "seen": dict(sorted(seen.items(), key=lambda item: item[1])[-512:]),
+                "bucket": record.get("bucket")
+                if isinstance(record.get("bucket"), str)
+                and len(record["bucket"]) <= 100
+                else "",
+                "selected": record.get("selected")
+                if _history_id(record.get("selected"))
+                else "",
+            }
+        return dict(sorted(cleaned.items(), key=lambda item: item[1]["updated"])[-32:])
+    except (OSError, ValueError):
+        return {}
+
+
+def _write_history(path: Path, records: dict[str, Any]) -> None:
+    temporary = None
+    try:
+        records = dict(
+            sorted(records.items(), key=lambda item: item[1]["updated"])[-32:]
+        )
+        for record in records.values():
+            record["seen"] = dict(
+                sorted(record["seen"].items(), key=lambda item: item[1])[-512:]
+            )
+        encoded = json.dumps(
+            {"placements": records}, separators=(",", ":"), allow_nan=False
+        )
+        if len(encoded.encode()) > 1024 * 1024:
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=path.parent, delete=False
+        ) as handle:
+            temporary = handle.name
+            handle.write(encoded)
+        os.replace(temporary, path)
+    except (OSError, TypeError, ValueError):
+        pass
+    finally:
+        if temporary:
+            with contextlib.suppress(OSError):
+                os.unlink(temporary)
+
+
+def _select_rotation(
+    result: dict[str, Any],
+    options: dict[str, Any],
+    ctx: dict[str, Any],
+    repeat_days: int,
+) -> dict[str, Any]:
+    placement = ctx.get("placement_id") or ctx.get("cell_id")
+    width, height = ctx.get("cell_w"), ctx.get("cell_h")
+    if (
+        not placement
+        or not _integer(width)
+        or not _integer(height)
+        or not ctx.get("data_dir")
+    ):
+        return result
+    pool = _rotation_candidates(result.get("images"), options, width, height)
+    if not pool:
+        return result
+    now = time.time()
+    try:
+        minutes = float(options.get("rotation_minutes", 60))
+        interval = minutes * 60
+        if not math.isfinite(interval) or interval <= 0:
+            interval = 3600
+    except (TypeError, ValueError, OverflowError):
+        interval = 3600
+    bucket = f"{interval}:{math.floor(now / interval)}"
+    key = hashlib.sha256(str(placement).encode()).hexdigest()
+    path = Path(ctx["data_dir"]) / "civitai-history.json"
+    with _HIST_LOCK:
+        records = _read_history(path)
+        record = records.get(key, {})
+        if record.get("bucket") == bucket:
+            selected = next(
+                (image for image in pool if str(image["id"]) == record.get("selected")),
+                None,
+            )
+            if selected:
+                return {**result, "selected_id": selected["id"]}
+        seen = record.get("seen", {})
+        cutoff = now - repeat_days * 86400
+        rested = [
+            image for image in pool if seen.get(str(image["id"]), -math.inf) <= cutoff
+        ]
+        candidates = rested if repeat_days and rested else pool
+
+        def order(image: dict[str, Any]) -> tuple[Any, ...]:
+            ident = str(image["id"])
+            priority = 0 if image.get("source_priority") == 0 else 1
+            tie = hashlib.sha256(f"{key}:{bucket}:{ident}".encode()).hexdigest()
+            if repeat_days and not rested:
+                return seen.get(ident, -math.inf), priority, tie
+            return priority, tie
+
+        selected = min(candidates, key=order)
+        preview = bool(ctx.get("preview"))
+        if not preview and ctx.get("settled", not preview):
+            # This records the scheduled primary, not a delivery acknowledgement.
+            # A client-side image-load fallback does not write another history entry.
+            records[key] = {
+                "updated": now,
+                "seen": {**seen, str(selected["id"]): now},
+                "bucket": bucket,
+                "selected": str(selected["id"]),
+            }
+            _write_history(path, records)
+    return {**result, "selected_id": selected["id"]}
+
+
+def _fetch_pool(
+    options: dict[str, Any], settings: dict[str, Any], *, ctx: dict[str, Any]
+) -> dict[str, Any]:
     """Return a shared candidate pool; cell dimensions and rotation belong to the client."""
     placement = str(ctx.get("placement_id") or ctx.get("cell_id") or "")
     metadata = {"placement_id": placement}
@@ -352,13 +640,14 @@ def _fetch(
         period = options.get("period", "Week")
         if (
             match not in ("any", "all")
-            or sort not in ("Most Reactions", "Most Collected", "Most Comments", "Newest")
+            or sort
+            not in ("Most Reactions", "Most Collected", "Most Comments", "Newest")
             or period not in ("Day", "Week", "Month", "AllTime")
         ):
             raise FeedError("Choose a supported tag match, sort and period.")
-        if (len(positives) if match == "any" else 1) * max(1, len(users)) > 8:
+        if len(users) + (len(positives) if match == "any" else bool(positives)) > 8:
             raise FeedError(
-                "Use at most 8 positive-tag and creator combinations, or choose all tags."
+                "Use at most 8 creator and positive-tag sources in total, or choose all tags."
             )
         refresh = float(options.get("refresh_hours", 24))
         if not 1 <= refresh <= 168:
@@ -384,7 +673,16 @@ def _fetch(
     )
     key = hashlib.sha256(
         json.dumps(
-            [positives, negatives, users, match, sort, period, identity]
+            [
+                "stats-creators-v1",
+                positives,
+                negatives,
+                users,
+                match,
+                sort,
+                period,
+                identity,
+            ]
         ).encode()
     ).hexdigest()
     path = Path(ctx["data_dir"]) / "civitai-cache.json"
@@ -395,7 +693,14 @@ def _fetch(
     images = _cached_images(record)
     fetched = record.get("fetched", 0)
     if isinstance(fetched, (int, float)) and 0 <= now - fetched < refresh * 3600:
-        return {"images": images}
+        return {
+            "images": images,
+            **(
+                {"warning": record["warning"]}
+                if isinstance(record.get("warning"), str)
+                else {}
+            ),
+        }
     if now < max(state.get("retry_at", 0), record.get("retry_at", 0)):
         result = {
             "images": images,
@@ -455,68 +760,76 @@ def _fetch(
     try:
         resolved = []
         sampled = False
-        for term in positives:
-            if term in STYLE_TAG_IDS:
-                resolved.append(STYLE_TAG_IDS[term])
-                continue
-            if term.isascii() and term.isdecimal() and _integer(int(term)):
-                resolved.append(int(term))
-                continue
-            saved = state["tags"].get(f"{identity}:{term}", {})
-            if not isinstance(saved, dict) or now - saved.get("at", 0) > 30 * 86400:
-                saved = {}
-            if not saved and api_key:
-                query = {"json": {"query": term, "entityType": ["Image"], "limit": 100}}
-                response = request(
-                    f"{TAG_URL}?{urlencode({'input': json.dumps(query)})}"
-                )
-                try:
-                    payload = response["result"]["data"]["json"]
-                    tags = (
-                        payload.get("items", [])
-                        if isinstance(payload, dict)
-                        else payload
-                    )
-                except (TypeError, KeyError):
-                    raise FeedError(
-                        "Civitai tag lookup is unavailable. Try a numeric image tag ID."
-                    ) from None
-                for tag in _tags(tags):
-                    if tag["name"].casefold() == term:
-                        saved = {"id": tag["id"], "at": now}
-                        state["tags"][f"{identity}:{term}"] = saved
-                        break
-            elif not saved:
-                if not sampled:
-                    sample = request(f"{API_URL}?{urlencode({**base, 'limit': 200})}")
-                    if not isinstance(sample, dict) or not isinstance(
-                        sample.get("items"), list
-                    ):
-                        raise FeedError(
-                            "Civitai returned an unreadable image collection."
-                        )
-                    remember_tags(sample["items"])
-                    sampled = True
+        tag_warning = ""
+        try:
+            for term in positives:
+                if term in STYLE_TAG_IDS:
+                    resolved.append(STYLE_TAG_IDS[term])
+                    continue
+                if term.isascii() and term.isdecimal() and _integer(int(term)):
+                    resolved.append(int(term))
+                    continue
                 saved = state["tags"].get(f"{identity}:{term}", {})
-            if not _integer(saved.get("id")):
-                raise FeedError(
-                    f"Could not find image tag '{term}'. Add a Civitai API key in widget settings for tag lookup, or enter its numeric tag ID."
-                )
-            resolved.append(saved["id"])
-
+                if not isinstance(saved, dict) or now - saved.get("at", 0) > 30 * 86400:
+                    saved = {}
+                if not saved and api_key:
+                    query = {
+                        "json": {"query": term, "entityType": ["Image"], "limit": 100}
+                    }
+                    response = request(
+                        f"{TAG_URL}?{urlencode({'input': json.dumps(query)})}"
+                    )
+                    try:
+                        payload = response["result"]["data"]["json"]
+                        tags = (
+                            payload.get("items", [])
+                            if isinstance(payload, dict)
+                            else payload
+                        )
+                    except (TypeError, KeyError):
+                        raise FeedError(
+                            "Civitai tag lookup is unavailable. Try a numeric image tag ID."
+                        ) from None
+                    for tag in _tags(tags):
+                        if tag["name"].casefold() == term:
+                            saved = {"id": tag["id"], "at": now}
+                            state["tags"][f"{identity}:{term}"] = saved
+                            break
+                elif not saved:
+                    if not sampled:
+                        sample = request(
+                            f"{API_URL}?{urlencode({**base, 'limit': 200})}"
+                        )
+                        if not isinstance(sample, dict) or not isinstance(
+                            sample.get("items"), list
+                        ):
+                            raise FeedError(
+                                "Civitai returned an unreadable image collection."
+                            )
+                        remember_tags(sample["items"])
+                        sampled = True
+                    saved = state["tags"].get(f"{identity}:{term}", {})
+                if not _integer(saved.get("id")):
+                    raise FeedError(
+                        f"Could not find image tag '{term}'. Add a Civitai API key in widget settings for tag lookup, or enter its numeric tag ID."
+                    )
+                resolved.append(saved["id"])
+        except FeedError as err:
+            if not users:
+                raise
+            resolved = []
+            tag_warning = str(err)
         groups = (
             [str(tag) for tag in resolved]
             if match == "any"
             else [",".join(map(str, resolved))]
+            if resolved
+            else []
         )
-        queries = [
-            {
-                **base,
-                **({"tags": group} if group else {}),
-                **({"username": user} if user else {}),
-            }
-            for user, group in itertools.product(users or [""], groups or [""])
-        ]
+        queries = (
+            [{**base, "username": user} for user in users]
+            + [{**base, "tags": group} for group in groups]
+        ) or [base]
         positive_ids = set(resolved)
         negative_ids = {
             int(term) for term in negatives if term.isascii() and term.isdecimal()
@@ -548,10 +861,17 @@ def _fetch(
                         continue
                     ids = {tag["id"] for tag in clean["tags"]}
                     names = {tag["name"].casefold() for tag in clean["tags"]}
-                    if users and clean["username"].casefold() not in users:
+                    creator = query.get("username")
+                    if creator and clean["username"].casefold() != creator:
                         continue
-                    if positives and not (
-                        positive_ids <= ids if match == "all" else positive_ids & ids
+                    if (
+                        not creator
+                        and positives
+                        and not (
+                            positive_ids <= ids
+                            if match == "all"
+                            else positive_ids & ids
+                        )
                     ):
                         continue
                     if negatives and (
@@ -560,6 +880,7 @@ def _fetch(
                         or negative_names & names
                     ):
                         continue
+                    clean["source_priority"] = 0 if creator else 1
                     sources[source_index][clean["id"]] = clean
                 metadata = response.get("metadata", {})
                 cursor = (
@@ -583,7 +904,6 @@ def _fetch(
                 remaining_cursors,
                 remaining_indexes,
             )
-        found = {}
         diverse_sources = []
         for source in sources:
             orientations = [[], [], []]
@@ -604,18 +924,32 @@ def _fetch(
                     if candidate is not None
                 ]
             )
-        for row in itertools.zip_longest(*diverse_sources):
-            for candidate in row:
-                if candidate is not None:
-                    found[candidate["id"]] = candidate
-                    if len(found) >= MAX_IMAGES:
-                        break
-            if len(found) >= MAX_IMAGES:
-                break
-        images = list(found.values())
-        state["pools"][key] = {"images": images, "fetched": now, "attempted": now}
+        priorities: list[list[dict[str, Any]]] = [[], []]
+        seen = set()
+        for priority, group in enumerate(
+            (diverse_sources[: len(users)], diverse_sources[len(users) :])
+        ):
+            for row in itertools.zip_longest(*group):
+                for candidate in row:
+                    if candidate is not None and candidate["id"] not in seen:
+                        seen.add(candidate["id"])
+                        priorities[priority].append(candidate)
+        creators, discoveries = priorities
+        creator_count = min(
+            len(creators), MAX_IMAGES * 3 // 4 if discoveries else MAX_IMAGES
+        )
+        discovery_count = min(len(discoveries), MAX_IMAGES - creator_count)
+        creator_count = min(len(creators), MAX_IMAGES - discovery_count)
+        images = creators[:creator_count] + discoveries[:discovery_count]
+        warning = {"warning": tag_warning} if tag_warning else {}
+        state["pools"][key] = {
+            "images": images,
+            "fetched": now,
+            "attempted": now,
+            **warning,
+        }
         _save(path, state)
-        return {"images": images}
+        return {"images": images, **warning}
     except urllib.error.HTTPError as err:
         if err.code == 429:
             delay = 120

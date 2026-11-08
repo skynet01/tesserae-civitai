@@ -291,3 +291,42 @@ test("three slow attempts share a total twelve-second load budget", async t => {
   assert.equal(elapsed, 12000);
   assert.match(shadow.innerHTML, /could not be loaded/);
 });
+
+test("a valid durable selected ID anchors the rendered image", async () => {
+  const images = [image(1, 2400, 1600), image(2, 2400, 1600)];
+  assert.equal(selectImage(images, landscape, {}, { now: 0, selectedId: 2 }).id, 2);
+  const shadow = imageShadow([true]);
+  await render(shadow, { cell: landscape, data: { images, selected_id: 2 } });
+  assert.deepEqual(shadow.attempts, ["https://image.civitai.com/test/2.jpeg"]);
+});
+
+test("a durable selected ID cannot bypass orientation or preferred native resolution", () => {
+  const images = [image(1, 2400, 1600), image(2, 1800, 2400), image(3, 800, 600)];
+  for (const selectedId of [2, 3, 999]) {
+    assert.equal(selectImage(images, landscape, {}, { now: 0, selectedId }).id, 1);
+  }
+  assert.equal(selectImage(images.slice(2), landscape, { resolution: "native_only" }, { now: 0, selectedId: 3 }), null);
+});
+
+test("eligible creator images take priority over tag and legacy candidates", () => {
+  const images = [image(1, 2400, 1600), image(2, 2400, 1600, { source_priority: 1 }),
+    image(3, 2400, 1600, { source_priority: 0 })];
+  for (let bucket = 0; bucket < 4; bucket++) {
+    assert.equal(selectImage(images, landscape, {}, { now: bucket * 3600000 }).id, 3);
+  }
+  assert.equal(selectImage([image(1, 800, 600, { source_priority: 0 }), image(2, 2400, 1600)],
+    landscape, {}, { now: 0 }).id, 2);
+});
+
+test("a valid durable tag anchor can override creator preference to avoid a recent repeat", () => {
+  const images = [image(1, 2400, 1600, { source_priority: 0 }), image(2, 2400, 1600, { source_priority: 1 })];
+  assert.equal(selectImage(images, landscape, {}, { now: 0, selectedId: 2 }).id, 2);
+});
+
+test("a failed creator anchor retries another eligible creator before a tag image", async () => {
+  const shadow = imageShadow([false, true]);
+  const images = [image(1, 2400, 1600, { source_priority: 1 }),
+    image(2, 2400, 1600, { source_priority: 0 }), image(3, 2400, 1600, { source_priority: 0 })];
+  await render(shadow, { cell: landscape, data: { images, selected_id: 2 } });
+  assert.deepEqual(shadow.attempts, ["https://image.civitai.com/test/2.jpeg", "https://image.civitai.com/test/3.jpeg"]);
+});

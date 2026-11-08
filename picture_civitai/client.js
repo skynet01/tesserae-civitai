@@ -48,6 +48,15 @@ export function selectImage(images, cell, options = {}, runtime = {}) {
   }
   if (!pool.length) return null;
 
+  // A durable server choice may deliberately rest a recently shown creator.
+  // Honour it only after the same orientation and resolution checks as usual.
+  if (runtime.selectedId != null) {
+    const selected = pool.find(image => String(image.id) === String(runtime.selectedId));
+    if (selected) return selected;
+  }
+  const creators = pool.filter(image => image.source_priority === 0);
+  if (creators.length) pool = creators;
+
   pool.sort((a, b) => {
     const left = String(a.id ?? a.url);
     const right = String(b.id ?? b.url);
@@ -117,6 +126,7 @@ export default async function render(shadow, ctx = {}) {
   const runtime = {
     placementId: data.placement_id ?? ctx.placement_id ?? ctx.cell?.id ?? "",
     now: started,
+    selectedId: data.selected_id,
   };
   let pool = Array.isArray(data.images) ? data.images : [];
   let image = selectImage(pool, cell, options, runtime);

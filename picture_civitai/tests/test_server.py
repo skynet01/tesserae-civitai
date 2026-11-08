@@ -148,6 +148,7 @@ def test_public_feed_has_native_dimensions_and_fixed_safe_query(
             "username": "alice",
             "permalink": "https://civitai.com/images/1",
             "tags": [{"id": 10, "name": "landscape"}],
+            "source_priority": 1,
         }
     ]
     query = parse_qs(urlsplit(calls[0]).query)
@@ -158,7 +159,7 @@ def test_public_feed_has_native_dimensions_and_fixed_safe_query(
     assert query["period"] == ["Week"]
 
 
-def test_creator_restriction_and_any_positive_tags_are_locally_verified(
+def test_creators_are_collected_first_without_tags_then_tag_discoveries_are_added(
     server, monkeypatch, tmp_path
 ):
     entries = [
@@ -173,13 +174,19 @@ def test_creator_restriction_and_any_positive_tags_are_locally_verified(
         {},
         ctx={"data_dir": str(tmp_path)},
     )
-    assert [entry["id"] for entry in result["images"]] == [1, 2]
-    assert {parse_qs(urlsplit(url).query)["tags"][0] for url in calls} == {"10", "20"}
-    assert all(parse_qs(urlsplit(url).query)["username"] == ["alice"] for url in calls)
+    assert [entry["id"] for entry in result["images"]] == [1, 2, 4, 3]
+    assert [entry["source_priority"] for entry in result["images"]] == [0, 0, 0, 1]
+    queries = [parse_qs(urlsplit(url).query) for url in calls]
+    assert queries[0]["username"] == ["alice"]
+    assert "tags" not in queries[0]
+    assert [query["tags"] for query in queries[1:]] == [["10"], ["20"]]
+    assert all("username" not in query for query in queries[1:])
 
 
 @pytest.mark.parametrize("sort", ["Most Collected", "Most Comments"])
-def test_popularity_order_has_its_own_reusable_pool(server, monkeypatch, tmp_path, sort):
+def test_popularity_order_has_its_own_reusable_pool(
+    server, monkeypatch, tmp_path, sort
+):
     def response(url, query):
         return {"items": [image(2 if query["sort"] == [sort] else 1)]}
 
@@ -868,3 +875,479 @@ def test_api_redirect_never_sends_key_to_another_host(server):
         server._ApiRedirect().redirect_request(
             request, None, 302, "Found", {}, "https://example.com/api/v1/images"
         )
+
+
+def engagement(**changes):
+    return {
+        "cryCount": 1,
+        "laughCount": 2,
+        "likeCount": 3,
+        "heartCount": 4,
+        "commentCount": 2,
+        **changes,
+    }
+
+
+def test_engagement_minimums_are_inclusive_and_reuse_the_unfiltered_pool(
+    server, monkeypatch, tmp_path
+):
+    entries = [
+        image(1, stats=engagement(dislikeCount=999, collectionCount=999)),
+        image(2, stats=engagement(cryCount=0, laughCount=0, likeCount=9, heartCount=0)),
+        image(3, stats=engagement(commentCount=1)),
+    ]
+    calls = fake_network(monkeypatch, server, lambda *_: {"items": entries})
+    ctx = {"data_dir": str(tmp_path)}
+    result = server.fetch({"min_reactions": 10, "min_comments": 2}, {}, ctx=ctx)
+    assert [entry["id"] for entry in result["images"]] == [1]
+    assert result["images"][0]["stats"] == {
+        "cryCount": 1,
+        "laughCount": 2,
+        "likeCount": 3,
+        "heartCount": 4,
+        "commentCount": 2,
+    }
+    assert [
+        entry["id"]
+        for entry in server.fetch({"min_reactions": 9, "min_comments": 2}, {}, ctx=ctx)[
+            "images"
+        ]
+    ] == [1, 2]
+    assert [entry["id"] for entry in server.fetch({}, {}, ctx=ctx)["images"]] == [
+        1,
+        2,
+        3,
+    ]
+    assert len(calls) == 1
+    cache = json.loads((tmp_path / "civitai-cache.json").read_text())
+    assert len(cache["pools"]) == 1
+    saved = next(iter(cache["pools"].values()))["images"]
+    assert len(saved) == 3
+    assert all(
+        set(entry["stats"])
+        == {"cryCount", "laughCount", "likeCount", "heartCount", "commentCount"}
+        for entry in saved
+    )
+
+
+@pytest.mark.parametrize("field", ["min_reactions", "min_comments"])
+@pytest.mark.parametrize(
+    "value",
+    [
+        True,
+        False,
+        -1,
+        0.5,
+        float("nan"),
+        float("inf"),
+        -float("inf"),
+        1_000_000_001,
+        "1000000001",
+        "NaN",
+        "Infinity",
+        "1.5",
+        "1.00000000000000000001",
+        "",
+        "garbage",
+        "1_0",
+        "0x10",
+        None,
+        [],
+        {},
+    ],
+)
+def test_invalid_engagement_minimums_fail_before_network(
+    server, monkeypatch, tmp_path, field, value
+):
+    calls = fake_network(monkeypatch, server, lambda *_: {"items": [image()]})
+    result = server.fetch({field: value}, {}, ctx={"data_dir": str(tmp_path)})
+    assert result["images"] == []
+    assert "minimum" in result["error"].lower()
+    assert calls == []
+
+
+@pytest.mark.parametrize("minimum", [0, " 0 ", 10.0, "10.0", "1e1", 1_000_000_000])
+def test_engagement_minimums_accept_host_numbers_and_upper_boundary(
+    server, monkeypatch, tmp_path, minimum
+):
+    fake_network(
+        monkeypatch,
+        server,
+        lambda *_: {
+            "items": [
+                image(
+                    stats=engagement(
+                        likeCount=1_000_000_000,
+                        commentCount=1_000_000_000,
+                    )
+                )
+            ]
+        },
+    )
+    result = server.fetch(
+        {"min_reactions": minimum, "min_comments": minimum},
+        {},
+        ctx={"data_dir": str(tmp_path)},
+    )
+    assert [entry["id"] for entry in result["images"]] == [1]
+
+
+@pytest.mark.parametrize("stats", [None, [], "invalid", {}])
+def test_missing_stats_remain_usable_only_with_disabled_minimums(
+    server, monkeypatch, tmp_path, stats
+):
+    calls = fake_network(
+        monkeypatch, server, lambda *_: {"items": [image(stats=stats)]}
+    )
+    ctx = {"data_dir": str(tmp_path)}
+    assert server.fetch({}, {}, ctx=ctx)["images"]
+    for field in ("min_reactions", "min_comments"):
+        result = server.fetch({field: 1}, {}, ctx=ctx)
+        assert result["images"] == []
+        assert "minimum" in result["error"].lower()
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("field", ["cryCount", "laughCount", "likeCount", "heartCount"])
+@pytest.mark.parametrize("bad", [None, True, -1, 1.5, "10", float("nan"), float("inf")])
+def test_malformed_reaction_counts_fail_closed_without_blocking_valid_comments(
+    server, monkeypatch, tmp_path, field, bad
+):
+    fake_network(
+        monkeypatch,
+        server,
+        lambda *_: {"items": [image(stats=engagement(**{field: bad}))]},
+    )
+    ctx = {"data_dir": str(tmp_path)}
+    assert server.fetch({"min_reactions": 1}, {}, ctx=ctx)["images"] == []
+    result = server.fetch({"min_comments": 2}, {}, ctx=ctx)
+    assert [entry["id"] for entry in result["images"]] == [1]
+    assert field not in result["images"][0]["stats"]
+
+
+def test_incomplete_reactions_and_invalid_comments_are_independently_rejected(
+    server, monkeypatch, tmp_path
+):
+    partial = engagement()
+    del partial["cryCount"]
+    fake_network(
+        monkeypatch,
+        server,
+        lambda *_: {
+            "items": [
+                image(1, stats=partial),
+                image(2, stats=engagement(commentCount=False)),
+                image(
+                    3,
+                    stats=engagement(
+                        cryCount=0, laughCount=0, likeCount=0, heartCount=0
+                    ),
+                ),
+            ]
+        },
+    )
+    ctx = {"data_dir": str(tmp_path)}
+    assert [
+        entry["id"]
+        for entry in server.fetch({"min_reactions": 10}, {}, ctx=ctx)["images"]
+    ] == [2]
+    assert [
+        entry["id"]
+        for entry in server.fetch({"min_comments": 2}, {}, ctx=ctx)["images"]
+    ] == [1, 3]
+
+
+@pytest.mark.parametrize("bad", [None, True, -1, 1.5, "2", float("nan"), float("inf")])
+def test_malformed_comments_cannot_pass_a_positive_minimum(
+    server, monkeypatch, tmp_path, bad
+):
+    fake_network(
+        monkeypatch,
+        server,
+        lambda *_: {"items": [image(stats=engagement(commentCount=bad))]},
+    )
+    ctx = {"data_dir": str(tmp_path)}
+    assert server.fetch({"min_comments": 1}, {}, ctx=ctx)["images"] == []
+    assert server.fetch({"min_reactions": 10}, {}, ctx=ctx)["images"]
+
+
+def test_oversized_integer_minimum_fails_with_a_setting_error(
+    server, monkeypatch, tmp_path
+):
+    calls = fake_network(monkeypatch, server, lambda *_: {"items": [image()]})
+    result = server.fetch(
+        {"min_reactions": 10**5000}, {}, ctx={"data_dir": str(tmp_path)}
+    )
+    assert result["images"] == [] and "minimum" in result["error"].lower()
+    assert calls == []
+
+
+def test_engagement_minimums_apply_to_stale_and_inflight_cached_results(
+    server, monkeypatch, tmp_path
+):
+    clock = [100000.0]
+    monkeypatch.setattr(server.time, "time", lambda: clock[0])
+    calls = fake_network(
+        monkeypatch,
+        server,
+        lambda *_: {
+            "items": [
+                image(1, stats=engagement()),
+                image(2, stats=engagement(commentCount=1)),
+            ]
+        },
+    )
+    ctx = {"data_dir": str(tmp_path)}
+    assert len(server.fetch({}, {}, ctx=ctx)["images"]) == 2
+    clock[0] += 90000
+    server._LOCK.acquire()
+    try:
+        pending = server.fetch({"min_comments": 2}, {}, ctx=ctx)
+        assert [entry["id"] for entry in pending["images"]] == [1]
+        assert pending["stale"] and pending["live_refresh_s"] == 2
+        empty = server.fetch({"min_reactions": 11}, {}, ctx=ctx)
+        assert empty["images"] == []
+        assert "minimum" in empty["error"].lower()
+        cold = server.fetch(
+            {"min_comments": 2}, {}, ctx={"data_dir": str(tmp_path / "cold")}
+        )
+        assert cold["images"] == []
+        assert "updat" in cold["error"].lower()
+    finally:
+        server._LOCK.release()
+    assert len(calls) == 1
+
+    def offline(*args, **kwargs):
+        raise OSError("offline")
+
+    monkeypatch.setattr(server, "fetch_json", offline)
+    stale = server.fetch({"min_comments": 2}, {}, ctx=ctx)
+    assert [entry["id"] for entry in stale["images"]] == [1]
+    assert stale["stale"]
+    assert "could not load" in stale["error"].lower()
+    retry = server.fetch({"min_reactions": 11}, {}, ctx=ctx)
+    assert retry["images"] == [] and retry["stale"]
+    assert "minimum" in retry["error"].lower()
+
+
+def test_pool_schema_upgrade_collects_stats_once_and_keeps_cached_tag_resolution(
+    server, monkeypatch, tmp_path
+):
+    import hashlib
+
+    now = time.time()
+    old_key = hashlib.sha256(
+        json.dumps(
+            [
+                ["forest"],
+                [],
+                [],
+                "any",
+                "Most Reactions",
+                "Week",
+                "public",
+            ]
+        ).encode()
+    ).hexdigest()
+    (tmp_path / "civitai-cache.json").write_text(
+        json.dumps(
+            {
+                "pools": {
+                    old_key: {"images": [image()], "fetched": now, "attempted": now}
+                },
+                "tags": {"public:forest": {"id": 20, "at": now}},
+            }
+        )
+    )
+    calls = fake_network(
+        monkeypatch,
+        server,
+        lambda *_: {
+            "items": [
+                image(
+                    tags=[{"id": 20, "name": "forest"}],
+                    stats=engagement(),
+                )
+            ]
+        },
+    )
+    ctx = {"data_dir": str(tmp_path)}
+    result = server.fetch({"positive_tags": "forest", "min_comments": 2}, {}, ctx=ctx)
+    assert [entry["id"] for entry in result["images"]] == [1]
+    assert len(calls) == 1
+    assert parse_qs(urlsplit(calls[0]).query)["tags"] == ["20"]
+    again = server.fetch({"positive_tags": "forest", "min_reactions": 10}, {}, ctx=ctx)
+    assert again["images"] and len(calls) == 1
+
+
+def test_creator_discovery_obeys_exclusions_and_minimums_without_positive_tags(
+    server, monkeypatch, tmp_path
+):
+    def response(url, query):
+        if "username" in query:
+            return {
+                "items": [
+                    image(1, tags=[{"id": 30, "name": "person"}], stats=engagement()),
+                    image(2, tags=[{"id": 40, "name": "drawing"}], stats=engagement()),
+                    image(3, stats=engagement(commentCount=1)),
+                    image(4, username="mallory", stats=engagement()),
+                ]
+            }
+        return {"items": [image(5, username="bob", stats=engagement())]}
+
+    calls = fake_network(monkeypatch, server, response)
+    options = {
+        "users": "alice",
+        "positive_tags": "10",
+        "negative_tags": "person",
+        "min_comments": 2,
+    }
+    ctx = {"data_dir": str(tmp_path)}
+    result = server.fetch(options, {}, ctx=ctx)
+    assert [(entry["id"], entry["source_priority"]) for entry in result["images"]] == [
+        (2, 0),
+        (5, 1),
+    ]
+    assert server.fetch(options, {}, ctx=ctx)["images"] == result["images"]
+    assert len(calls) == 2
+
+
+def test_tag_all_matching_remains_strict_only_for_secondary_discoveries(
+    server, monkeypatch, tmp_path
+):
+    def response(url, query):
+        if "username" in query:
+            return {"items": [image(1, tags=[])]}
+        return {
+            "items": [
+                image(2, username="bob"),
+                image(
+                    3,
+                    username="bob",
+                    tags=[
+                        {"id": 10, "name": "landscape"},
+                        {"id": 20, "name": "forest"},
+                    ],
+                ),
+            ]
+        }
+
+    calls = fake_network(monkeypatch, server, response)
+    result = server.fetch(
+        {"users": "alice", "positive_tags": "10,20", "tag_match": "all"},
+        {},
+        ctx={"data_dir": str(tmp_path)},
+    )
+    assert [entry["id"] for entry in result["images"]] == [1, 3]
+    assert parse_qs(urlsplit(calls[1]).query)["tags"] == ["10,20"]
+
+
+@pytest.mark.parametrize(
+    "creators, tags, expected",
+    [
+        (100, 100, (75, 25)),
+        (100, 10, (90, 10)),
+        (10, 100, (10, 90)),
+    ],
+)
+def test_creator_pool_reserves_tag_fallback_and_fills_unused_quota(
+    server, monkeypatch, tmp_path, creators, tags, expected
+):
+    def response(url, query):
+        if "username" in query:
+            return {"items": [image(number + 1, tags=[]) for number in range(creators)]}
+        return {
+            "items": [image(number + 1000, username="bob") for number in range(tags)]
+        }
+
+    fake_network(monkeypatch, server, response)
+    result = server.fetch(
+        {"users": "alice", "positive_tags": "10"},
+        {},
+        ctx={"data_dir": str(tmp_path)},
+    )
+    assert len(result["images"]) == 100
+    assert (
+        tuple(
+            sum(entry["source_priority"] == priority for entry in result["images"])
+            for priority in (0, 1)
+        )
+        == expected
+    )
+    assert [entry["source_priority"] for entry in result["images"]] == sorted(
+        entry["source_priority"] for entry in result["images"]
+    )
+
+
+def test_creator_only_configuration_does_not_fetch_a_generic_secondary_feed(
+    server, monkeypatch, tmp_path
+):
+    calls = fake_network(monkeypatch, server, lambda *_: {"items": [image()]})
+    result = server.fetch({"users": "alice"}, {}, ctx={"data_dir": str(tmp_path)})
+    assert [entry["source_priority"] for entry in result["images"]] == [0]
+    assert len(calls) == 1
+
+
+def test_source_limit_counts_creator_plus_tag_groups_instead_of_the_product(
+    server, monkeypatch, tmp_path
+):
+    calls = fake_network(monkeypatch, server, lambda *_: {"items": []})
+    ctx = {"data_dir": str(tmp_path)}
+    valid = server.fetch({"users": "a,b,c,d", "positive_tags": "1,2,3,4"}, {}, ctx=ctx)
+    assert valid["images"] == [] and not valid.get("error")
+    assert len(calls) == 8
+    invalid = server.fetch(
+        {"users": "a,b,c,d", "positive_tags": "1,2,3,4,5"}, {}, ctx=ctx
+    )
+    assert invalid["images"] == [] and "8" in invalid["error"]
+    assert len(calls) == 8
+
+
+def test_unknown_secondary_tag_keeps_only_verified_creator_results_with_warning(
+    server, monkeypatch, tmp_path
+):
+    entries = [image(1, username="outsider"), image(2)]
+    calls = fake_network(monkeypatch, server, lambda *_: {"items": entries})
+    result = server.fetch(
+        {"users": "alice", "positive_tags": "not a known tag"},
+        {},
+        ctx={"data_dir": str(tmp_path)},
+    )
+    assert [entry["id"] for entry in result["images"]] == [2]
+    assert result["images"][0]["source_priority"] == 0
+    assert "not a known tag" in result["warning"]
+    cached = server.fetch(
+        {"users": "alice", "positive_tags": "not a known tag"},
+        {},
+        ctx={"data_dir": str(tmp_path)},
+    )
+    assert cached["images"] == result["images"]
+    assert cached["warning"] == result["warning"]
+    assert len(calls) == 2
+    assert parse_qs(urlsplit(calls[1]).query)["username"] == ["alice"]
+
+
+@pytest.mark.parametrize("failure", ["rate_limit", "auth", "transport"])
+def test_secondary_tag_transport_failure_is_not_ignored_for_creators(
+    server, monkeypatch, tmp_path, failure
+):
+    def failed(*args, **kwargs):
+        if failure == "transport":
+            raise OSError("offline")
+        raise HTTPError(
+            "https://civitai.com/api/trpc/tag.getAll",
+            429 if failure == "rate_limit" else 401,
+            failure,
+            {},
+            None,
+        )
+
+    calls = fake_network(monkeypatch, server, failed)
+    result = server.fetch(
+        {"users": "alice", "positive_tags": "not a known tag"},
+        {"api_key_secret": "private-test-key"},
+        ctx={"data_dir": str(tmp_path)},
+    )
+    assert result["images"] == [] and result["error"]
+    assert not result.get("warning")
+    assert len(calls) == 1

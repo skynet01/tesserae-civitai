@@ -2,7 +2,7 @@
   "tesserae_compat": "1.x",
   "tesserae_min": "0.484.1",
   "name": "Picture, Civitai",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "kind": "widget",
   "description": "Full-bleed artwork from Civitai's public SFW image feed. Filter by tags and creators, then rotate images that match this cell's orientation and resolution. An optional free Civitai API key enables full tag-name lookup.",
   "icon": "ph-image",
@@ -14,14 +14,14 @@
       "type": "textarea",
       "label": "Include tags",
       "default": "illustration, painting",
-      "help": "Comma- or newline-separated tag names or numeric IDs, up to 6. Starts with illustration or painting. Match any tag by default; choose All tags in More options. A Civitai API key enables full name lookup; without one, other names must occur in the sampled public feed. Blank tags and creators use the popular public feed."
+      "help": "Comma- or newline-separated tag names or numeric IDs, up to 6. Starts with illustration or painting. Tags use OR by default. Creator picks take priority; these tags add secondary discoveries. A Civitai API key enables full name lookup. Without one, other names must occur in the sampled public feed. Blank tags and creators use the popular public feed."
     },
     {
       "name": "users",
       "type": "textarea",
       "label": "Creators",
       "default": "",
-      "help": "Comma- or newline-separated Civitai usernames, up to 4. Creators restrict the image pool; include and exclude tags then apply within that pool. Leave blank for all creators."
+      "help": "Comma- or newline-separated Civitai usernames, up to 4. Prefer artwork from these creators even without an included tag; tags provide secondary discoveries. Excluded tags and minimum engagement still apply to every image. Leave blank to discover by tags."
     },
     {
       "name": "negative_tags",
@@ -99,6 +99,16 @@
       "help": "A stable image per placement and time interval, advancing through the pool without repeats. Changes appear on the next Tesserae render; this does not schedule device refreshes."
     },
     {
+      "name": "repeat_days",
+      "type": "number",
+      "label": "Avoid repeats (days)",
+      "default": 7,
+      "min": 0,
+      "max": 30,
+      "advanced": true,
+      "help": "Prefer artwork not selected for this placement within this window (7 days by default). Use a whole number; 0 disables the lookback. History survives collection refreshes. If every eligible image is recent, reuse the oldest pick. Previews do not advance history."
+    },
+    {
       "name": "sort",
       "type": "select",
       "label": "Prioritize",
@@ -110,6 +120,26 @@
         { "value": "Newest", "label": "Newest" }
       ],
       "help": "How Civitai ranks candidate artwork within the source time period (Month by default). Rotation cycles through the cached matches. Each priority has its own shared cache."
+    },
+    {
+      "name": "min_reactions",
+      "type": "number",
+      "label": "Minimum reactions",
+      "default": 0,
+      "min": 0,
+      "max": 1000000000,
+      "advanced": true,
+      "help": "Minimum combined likes, hearts, laughs and cries reported by Civitai. Use a whole number; 0 disables this filter. Missing counts cannot satisfy a positive minimum. Filters the cached collection without extra API requests."
+    },
+    {
+      "name": "min_comments",
+      "type": "number",
+      "label": "Minimum comments",
+      "default": 0,
+      "min": 0,
+      "max": 1000000000,
+      "advanced": true,
+      "help": "Minimum comment count reported by Civitai. Use a whole number; 0 disables this filter. Missing counts cannot satisfy a positive minimum. Counts update with the daily collection refresh."
     },
     {
       "name": "period",
@@ -153,8 +183,9 @@
   "requires": ["network:civitai.com", "network:image.civitai.com"],
   "data_schema": {
     "fields": [
-      { "name": "images", "type": "arr", "label": "Filtered image pool (ID, URL, dimensions, creator, link and tags)" },
+      { "name": "images", "type": "arr", "label": "Filtered image pool (ID, URL, dimensions, creator, link, tags and engagement counts)" },
       { "name": "placement_id", "type": "str", "label": "Placement rotation identity" },
+      { "name": "selected_id", "type": "num", "label": "Selected image for this rotation interval" },
       { "name": "target_w", "type": "num", "label": "Physical cell width" },
       { "name": "target_h", "type": "num", "label": "Physical cell height" },
       { "name": "error", "type": "str", "label": "Fetch error" }
