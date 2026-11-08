@@ -26,6 +26,8 @@ For full positive tag-name lookup, create a free personal API key at [Civitai ac
 
 Only public images marked SFW by Civitai are requested. Filtering depends on Civitai's metadata; it does not inspect image contents. Candidate collection is bounded, so narrow combinations can have no matches even when matching images exist elsewhere on Civitai.
 
+The manifest declares `network:*` because Tesserae's checked downloader connects to pinned public IP addresses, which its domain-only capability declarations reject. The widget still accepts only the two fixed HTTPS API paths on `civitai.com`, rejects redirects outside them, and validates image URLs against `image.civitai.com`. Private-address and DNS-rebinding protection remain active.
+
 ## Orientation and image size
 
 **Auto** uses the actual cell dimensions, even when the cell and whole display have different orientations. A landscape cell accepts landscape images, a portrait cell accepts portrait images, and a square cell accepts square images. Explicit **Landscape** and **Portrait** exclude square images. **Any** accepts all shapes. A filter with no eligible images shows a clear empty state; it never silently substitutes a different orientation.

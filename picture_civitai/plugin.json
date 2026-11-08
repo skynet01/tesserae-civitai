@@ -2,7 +2,7 @@
   "tesserae_compat": "1.x",
   "tesserae_min": "0.484.1",
   "name": "Picture, Civitai",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "kind": "widget",
   "description": "Full-bleed artwork from Civitai's public SFW image feed. Filter by tags and creators, then rotate images that match this cell's orientation and resolution. An optional free Civitai API key enables full tag-name lookup.",
   "icon": "ph-image",
@@ -148,7 +148,7 @@
     "per_placement": true
   },
   "design": { "palette": "extended" },
-  "requires": ["network:civitai.com", "network:image.civitai.com"],
+  "requires": ["network:*"],
   "data_schema": {
     "fields": [
       { "name": "images", "type": "arr", "label": "Filtered image pool (ID, URL, dimensions, creator, link and tags)" },

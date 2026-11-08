@@ -54,6 +54,21 @@ def test_drawing_style_uses_verified_image_tag_without_discovery(
     assert parse_qs(urlsplit(calls[0]).query)["tags"] == ["81"]
 
 
+def test_declared_network_access_allows_the_guarded_transport_pinned_ip(monkeypatch):
+    from app import capabilities
+
+    manifest = json.loads((Path(__file__).parents[1] / "plugin.json").read_text())
+    caps = capabilities.parse("picture_civitai", manifest["requires"])
+    monkeypatch.setattr(
+        capabilities, "_original_create_connection", lambda address: address
+    )
+    with capabilities.capability_scope(caps):
+        assert capabilities._hooked_create_connection(("172.66.152.186", 443)) == (
+            "172.66.152.186",
+            443,
+        )
+
+
 def fake_network(monkeypatch, server, callback):
     calls = []
 
