@@ -44,7 +44,9 @@ For Fit, the required scale is `min(cell width / image width, cell height / imag
 
 ## Refresh and rotation
 
-The candidate pool refreshes every 24 hours by default. The illustration/painting preset normally needs two image-list requests per refresh and no tag lookups. An empty source can follow one additional cursor, within a total cap of eight image-list requests. Renders and placements with the same filters share the persistent cache; changing orientation or resolution does not make another API request. Custom tag-name lookups are cached for 30 days. **More options** contains collection refresh, image rotation, source order, time period, scale, tag matching and creator credit controls.
+**Prioritize** chooses **Most reactions** (default), **Most collected**, **Most comments** or **Newest**. Civitai ranks the candidate collection using that order and the source time period (Month by default). Rotation then cycles through eligible cached matches. Changing priority fetches a separate collection once; switching back reuses it until its refresh is due. These sorts are supported by [Civitai's image API](https://github.com/civitai/civitai-developer-docs/blob/main/site/reference/images.md).
+
+The candidate pool refreshes every 24 hours by default. The illustration/painting preset normally needs two image-list requests per refresh and no tag lookups. An empty source can follow one additional cursor, within a total cap of eight image-list requests. Renders and placements with the same filters share the persistent cache; changing orientation or resolution does not make another API request. Custom tag-name lookups are cached for 30 days. **More options** contains collection refresh, image rotation, time period, scale, tag matching and creator credit controls.
 
 Image rotation defaults to 60 minutes. The choice stays stable within each time interval for each placement and advances through the eligible pool without repeating until it has visited every image. Pool changes can change that sequence. Rotation and collection updates appear on the next Tesserae render; these options do not schedule display refreshes.
 

@@ -352,7 +352,7 @@ def _fetch(
         period = options.get("period", "Week")
         if (
             match not in ("any", "all")
-            or sort not in ("Most Reactions", "Newest")
+            or sort not in ("Most Reactions", "Most Collected", "Most Comments", "Newest")
             or period not in ("Day", "Week", "Month", "AllTime")
         ):
             raise FeedError("Choose a supported tag match, sort and period.")

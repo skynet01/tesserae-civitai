@@ -2,7 +2,7 @@
   "tesserae_compat": "1.x",
   "tesserae_min": "0.484.1",
   "name": "Picture, Civitai",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "kind": "widget",
   "description": "Full-bleed artwork from Civitai's public SFW image feed. Filter by tags and creators, then rotate images that match this cell's orientation and resolution. An optional free Civitai API key enables full tag-name lookup.",
   "icon": "ph-image",
@@ -101,13 +101,15 @@
     {
       "name": "sort",
       "type": "select",
-      "label": "Source order",
+      "label": "Prioritize",
       "default": "Most Reactions",
-      "advanced": true,
       "choices": [
         { "value": "Most Reactions", "label": "Most reactions" },
+        { "value": "Most Collected", "label": "Most collected" },
+        { "value": "Most Comments", "label": "Most comments" },
         { "value": "Newest", "label": "Newest" }
-      ]
+      ],
+      "help": "How Civitai ranks candidate artwork within the source time period (Month by default). Rotation cycles through the cached matches. Each priority has its own shared cache."
     },
     {
       "name": "period",

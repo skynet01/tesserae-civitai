@@ -178,6 +178,25 @@ def test_creator_restriction_and_any_positive_tags_are_locally_verified(
     assert all(parse_qs(urlsplit(url).query)["username"] == ["alice"] for url in calls)
 
 
+@pytest.mark.parametrize("sort", ["Most Collected", "Most Comments"])
+def test_popularity_order_has_its_own_reusable_pool(server, monkeypatch, tmp_path, sort):
+    def response(url, query):
+        return {"items": [image(2 if query["sort"] == [sort] else 1)]}
+
+    calls = fake_network(monkeypatch, server, response)
+    ctx = {"data_dir": str(tmp_path)}
+    for _ in range(2):
+        result = server.fetch({"sort": sort}, {}, ctx=ctx)
+        assert [entry["id"] for entry in result["images"]] == [2]
+    assert len(calls) == 1
+    assert parse_qs(urlsplit(calls[0]).query)["sort"] == [sort]
+    default = server.fetch({}, {}, ctx=ctx)
+    assert [entry["id"] for entry in default["images"]] == [1]
+    assert len(calls) == 2
+    assert server.fetch({"sort": sort}, {}, ctx=ctx)["images"] == result["images"]
+    assert len(calls) == 2
+
+
 def test_all_tags_and_exclusions_fail_closed_for_missing_tags(
     server, monkeypatch, tmp_path
 ):
