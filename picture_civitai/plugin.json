@@ -2,9 +2,9 @@
   "tesserae_compat": "1.x",
   "tesserae_min": "0.484.1",
   "name": "Picture, AI galleries",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "kind": "widget",
-  "description": "Artwork from Civitai or Lexica. Filter by tags, creators or prompt terms, preview up to 20 matches, then rotate images that suit the cell orientation and resolution.",
+  "description": "Artwork from Civitai, Lexica or both. Filter by tags, creators or prompt terms, preview up to 20 matches, then rotate images that suit the cell orientation and resolution.",
   "icon": "ph-image",
   "category": "art",
   "lineups": { "pin_option": "pinned_image", "noun": "artworks" },
@@ -31,9 +31,10 @@
       "default": "civitai",
       "choices": [
         { "value": "civitai", "label": "Civitai" },
-        { "value": "lexica", "label": "Lexica" }
+        { "value": "lexica", "label": "Lexica" },
+        { "value": "both", "label": "Civitai + Lexica" }
       ],
-      "help": "Civitai uses image tags, creators and engagement. Lexica searches prompts and filters their text. Existing dashboards keep Civitai."
+      "help": "Combine both galleries, or use either one. Each service keeps its own cache and retry limits; if one is unavailable, eligible artwork from the other remains available. Creator and engagement settings apply to Civitai only."
     },
     {
       "name": "lexica_query",
@@ -41,7 +42,7 @@
       "label": "Lexica search",
       "default": "illustration painting",
       "show_if": {
-        "provider": "lexica"
+        "provider": ["lexica", "both"]
       },
       "help": "Search description, up to 300 characters. Include and exclude terms below are then checked against each returned prompt. Only results explicitly marked safe and not a multi-image grid are used."
     },
@@ -59,7 +60,7 @@
       "default": "",
       "help": "Comma- or newline-separated Civitai usernames, up to 4. Prefer artwork from these creators even without an included tag; tags provide secondary discoveries. Excluded tags and minimum engagement still apply to every image. Leave blank to discover by tags.",
       "show_if": {
-        "provider": "civitai"
+        "provider": ["civitai", "both"]
       }
     },
     {
@@ -160,7 +161,7 @@
       ],
       "help": "How Civitai ranks candidate artwork within the source time period (Month by default). Rotation cycles through the cached matches. Each priority has its own shared cache.",
       "show_if": {
-        "provider": "civitai"
+        "provider": ["civitai", "both"]
       }
     },
     {
@@ -173,7 +174,7 @@
       "advanced": true,
       "help": "Minimum combined likes, hearts, laughs and cries reported by Civitai. Use a whole number; 0 disables this filter. Missing counts cannot satisfy a positive minimum. Filters the cached collection without extra API requests.",
       "show_if": {
-        "provider": "civitai"
+        "provider": ["civitai", "both"]
       }
     },
     {
@@ -186,7 +187,7 @@
       "advanced": true,
       "help": "Minimum comment count reported by Civitai. Use a whole number; 0 disables this filter. Missing counts cannot satisfy a positive minimum. Counts update with the daily collection refresh.",
       "show_if": {
-        "provider": "civitai"
+        "provider": ["civitai", "both"]
       }
     },
     {
@@ -202,7 +203,7 @@
         { "value": "AllTime", "label": "All time" }
       ],
       "show_if": {
-        "provider": "civitai"
+        "provider": ["civitai", "both"]
       }
     },
     {

@@ -239,3 +239,41 @@ def test_pin_never_substitutes_another_image_or_bypasses_filters(gallery, key):
     result = server.fetch({**options, "pinned_image": key}, settings, ctx=ctx)
     assert result["images"] == [] and "pinned" in result["error"].lower()
     assert not (Path(ctx["data_dir"]) / "civitai-history.json").exists()
+
+
+def test_combined_galleries_list_and_pin_from_cache_without_changing_history(
+    gallery, monkeypatch
+):
+    server, options, settings, ctx, _, _ = gallery
+    ident = "0482ee68-0368-4eca-8846-5930db866b33"
+    monkeypatch.setattr(
+        server,
+        "fetch_json",
+        lambda *a, **k: {
+            "images": [
+                {
+                    "id": ident,
+                    "src": f"https://image.lexica.art/md/{ident}",
+                    "srcSmall": f"https://image.lexica.art/sm/{ident}",
+                    "width": 5000,
+                    "height": 3000,
+                    "prompt": "A cyberpunk painting",
+                    "nsfw": False,
+                    "grid": False,
+                }
+            ]
+        },
+    )
+    options = {**options, "provider": "both", "lexica_query": "city"}
+    server.fetch(options, settings, ctx={**ctx, "preview": True})
+    monkeypatch.setattr(
+        server, "fetch_json", lambda *a, **k: pytest.fail("Listing fetched the network")
+    )
+    listed = server.lineup_items(options, ctx=ctx)
+    assert {item["key"] for item in listed} == {"1", "6", f"lexica:{ident}"}
+    pinned = server.fetch(
+        {**options, "pinned_image": f"lexica:{ident}"}, settings, ctx=ctx
+    )
+    assert pinned["selected_id"] == f"lexica:{ident}"
+    assert len(pinned["images"]) == 1
+    assert not (Path(ctx["data_dir"]) / "civitai-history.json").exists()

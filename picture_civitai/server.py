@@ -352,20 +352,20 @@ def fetch(
         }
     pinned = pinned.strip()
     provider = options.get("provider", "civitai")
-    if provider not in ("civitai", "lexica"):
+    if provider not in ("civitai", "lexica", "both"):
         return {
             "images": [],
-            "error": "Choose Civitai or Lexica as the gallery service.",
+            "error": "Choose Civitai, Lexica, or both as the gallery service.",
         }
     try:
         reactions = (
             _minimum(options.get("min_reactions", 0), "reactions")
-            if provider == "civitai"
+            if provider != "lexica"
             else 0
         )
         comments = (
             _minimum(options.get("min_comments", 0), "comments")
-            if provider == "civitai"
+            if provider != "lexica"
             else 0
         )
     except FeedError as err:
@@ -384,6 +384,9 @@ def fetch(
         images = result["images"]
         filtered = []
         for candidate in images:
+            if candidate.get("provider") == "lexica":
+                filtered.append(candidate)
+                continue
             stats = candidate.get("stats", {})
             if reactions and (
                 not all(field in stats for field in REACTION_FIELDS)
@@ -522,7 +525,7 @@ def query_preview(
     positives = _terms(options.get("positive_tags", ""), 6, "positive tags")
     users = (
         _terms(options.get("users", ""), 4, "creators")
-        if options.get("provider", "civitai") == "civitai"
+        if options.get("provider", "civitai") in ("civitai", "both")
         else []
     )
     images = []
@@ -960,6 +963,40 @@ def _fetch(
     *,
     allow_network: bool = True,
 ) -> dict[str, Any]:
+    if options.get("provider") == "both":
+        civitai = _fetch(
+            {**options, "provider": "civitai"},
+            settings,
+            ctx,
+            allow_network=allow_network,
+        )
+        lexica = _fetch_lexica(options, ctx, allow_network=allow_network)
+        # Interleave before capping so a full Civitai pool cannot hide Lexica.
+        images = [
+            image
+            for pair in itertools.zip_longest(civitai["images"], lexica["images"])
+            for image in pair
+            if image is not None
+        ][:MAX_IMAGES]
+        notices = [
+            f"{name}: {result[field]}"
+            for name, result in (("Civitai", civitai), ("Lexica", lexica))
+            for field in ("error", "warning")
+            if result.get(field)
+        ]
+        combined: dict[str, Any] = {"images": images}
+        if notices:
+            combined["warning" if images else "error"] = " ".join(notices)
+        if any(result.get("stale") for result in (civitai, lexica)):
+            combined["stale"] = True
+        refreshes = [
+            result["live_refresh_s"]
+            for result in (civitai, lexica)
+            if result.get("live_refresh_s")
+        ]
+        if refreshes:
+            combined["live_refresh_s"] = min(refreshes)
+        return combined
     if options.get("provider") == "lexica":
         return _fetch_lexica(options, ctx, allow_network=allow_network)
     now = time.time()

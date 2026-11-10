@@ -179,6 +179,131 @@ def test_unsupported_provider_does_not_fetch(server, monkeypatch, tmp_path):
     assert "service" in result["error"].lower()
 
 
+def test_combined_galleries_merge_and_reuse_independent_caches(
+    server, monkeypatch, tmp_path
+):
+    calls = []
+
+    def network(url, **kwargs):
+        calls.append((url, kwargs))
+        if url.startswith(server.LEXICA_URL):
+            return {"images": [lexica()]}
+        return {
+            "items": [
+                {
+                    **civitai(1),
+                    "type": "image",
+                    "nsfwLevel": "None",
+                    "browsingLevel": 1,
+                    "stats": {
+                        "cryCount": 0,
+                        "laughCount": 0,
+                        "likeCount": 10,
+                        "heartCount": 0,
+                        "commentCount": 3,
+                    },
+                }
+            ]
+        }
+
+    monkeypatch.setattr(server, "fetch_json", network)
+    options = {
+        "provider": "both",
+        "lexica_query": "city",
+        "positive_tags": "painting",
+        "negative_tags": "photo",
+        "users": "alice",
+        "min_reactions": 5,
+        "min_comments": 2,
+        "resolution": "allow_smaller",
+    }
+    ctx = {"data_dir": str(tmp_path), "cell_w": 1600, "cell_h": 900, "preview": True}
+    settings = {"api_key": "private-civitai-only"}
+    result = server.query_preview(options, settings, ctx=ctx)
+    assert {str(image["id"]) for image in result["images"]} == {
+        "1",
+        f"lexica:{lexica()['id']}",
+    }
+    assert result["total"] == 2
+    assert result["images"][0]["matches"][0] == "Creator: alice"
+    assert len(calls) == 3
+    assert "Authorization" not in next(
+        kwargs["headers"] for url, kwargs in calls if url.startswith(server.LEXICA_URL)
+    )
+    server.fetch(options, settings, ctx=ctx)
+    server.fetch({**options, "provider": "civitai"}, settings, ctx=ctx)
+    server.fetch({**options, "provider": "lexica"}, settings, ctx=ctx)
+    assert len(calls) == 3
+    assert not (tmp_path / "civitai-history.json").exists()
+
+
+@pytest.mark.parametrize("failed", ["civitai", "lexica", "both"])
+def test_combined_galleries_keep_working_when_either_service_fails(
+    server, monkeypatch, tmp_path, failed
+):
+    def network(url, **kwargs):
+        service = "lexica" if url.startswith(server.LEXICA_URL) else "civitai"
+        if failed in (service, "both"):
+            raise TimeoutError("service unavailable")
+        if service == "lexica":
+            return {"images": [lexica()]}
+        return {
+            "items": [
+                {**civitai(1), "type": "image", "nsfwLevel": "None", "browsingLevel": 1}
+            ]
+        }
+
+    monkeypatch.setattr(server, "fetch_json", network)
+    result = server.fetch(
+        {"provider": "both", "lexica_query": "city"},
+        {},
+        ctx={"data_dir": str(tmp_path), "preview": True},
+    )
+    if failed == "both":
+        assert (
+            result["images"] == []
+            and "Civitai" in result["error"]
+            and "Lexica" in result["error"]
+        )
+    else:
+        assert len(result["images"]) == 1
+        assert "error" not in result
+        assert ("Civitai" if failed == "civitai" else "Lexica") in result["warning"]
+
+
+def test_combined_collection_cap_keeps_both_services_and_native_rules(
+    server, monkeypatch, tmp_path
+):
+    def network(url, **kwargs):
+        if url.startswith(server.LEXICA_URL):
+            return {
+                "images": [
+                    lexica(f"{i:08x}-0368-4eca-8846-5930db866b33") for i in range(50)
+                ]
+            }
+        return {
+            "items": [
+                {**civitai(i), "type": "image", "nsfwLevel": "None", "browsingLevel": 1}
+                for i in range(1, 101)
+            ]
+        }
+
+    monkeypatch.setattr(server, "fetch_json", network)
+    options = {"provider": "both", "lexica_query": "city"}
+    ctx = {"data_dir": str(tmp_path), "preview": True, "cell_w": 1600, "cell_h": 900}
+    result = server.fetch(options, {}, ctx=ctx)
+    assert len(result["images"]) == server.MAX_IMAGES
+    assert sum(image.get("provider") == "lexica" for image in result["images"]) == 50
+    assert (
+        server.query_preview(
+            {**options, "resolution": "native_only"},
+            {},
+            ctx={**ctx, "cell_w": 3840, "cell_h": 2160},
+        )["total"]
+        == 0
+    )
+
+
 def test_lexica_failure_keeps_cached_matches_and_backs_off(
     server, monkeypatch, tmp_path
 ):

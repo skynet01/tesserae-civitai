@@ -1,12 +1,18 @@
 # AI gallery picture widget for Tesserae
 
-Rotating artwork from [Civitai](https://civitai.com) or [Lexica](https://lexica.art) for [Tesserae](https://github.com/dmellok/tesserae). Images fill the widget area, with an optional quiet creator credit. Configuration uses Tesserae's normal widget settings and cell options. The widget ID remains `picture_civitai`, and existing dashboards keep using Civitai.
+Rotating artwork from [Civitai](https://civitai.com), [Lexica](https://lexica.art), or both for [Tesserae](https://github.com/dmellok/tesserae). Images fill the widget area, with an optional quiet creator credit. Configuration uses Tesserae's normal widget settings and cell options. The widget ID remains `picture_civitai`, and existing dashboards keep using Civitai.
 
 ## Query preview and gallery choice
 
 Choose **Gallery service** in the widget options. **Preview query** opens a popup with up to 20 images from the eligible cached collection, using the current unsaved filters and target cell dimensions. Badges over each image show the matching creator and included tags, or the Lexica search and matching prompt terms. Click an image to open its original page. Preview does not advance rotation or change repeat history. Counts describe the bounded cached collection, rather than every result available from the service.
 
 The preview button requires Tesserae's query-preview editor hook (included in the companion core change). Older hosts can still render the widget and choose a gallery, but do not show the button.
+
+**Civitai + Lexica** combines up to 100 candidates, interleaving the two collections so both services are represented.
+Creator artwork still takes priority during rotation. Each service reuses its existing cache, refresh interval and retry
+backoff. If one service fails, the other service's eligible results remain usable with a warning. Cached results from
+an unavailable service can also remain usable. Civitai creator, popularity and minimum-engagement settings apply only
+to Civitai; include/exclude terms, orientation and resolution apply to both. No key is sent to Lexica.
 
 **Lexica search** accepts a description of up to 300 characters. Lexica's public API returns up to 50 candidates per search. Included terms must occur in each image's generation prompt (Any or All); excluded terms reject matching prompts. These are literal text checks, not Civitai tags or visual content recognition. Clear included terms to accept all safe search results. Creator, popularity, time-period and engagement filters apply only to Civitai and are hidden for Lexica. Orientation, resolution, rotation and repeat avoidance work with both services. Lexica candidates must explicitly have `nsfw: false` and `grid: false`.
 
