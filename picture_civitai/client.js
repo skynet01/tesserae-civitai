@@ -18,6 +18,12 @@ function shape(width, height) {
   return width > height ? "landscape" : width < height ? "portrait" : "square";
 }
 
+function scaleFor(cell, width, height, fit) {
+  const x = Number(cell.w) / width;
+  const y = Number(cell.h) / height;
+  return fit ? Math.min(x, y) : Math.max(x, y);
+}
+
 function source(image) {
   return image?.provider === "lexica"
     ? { name: "Lexica", imageHost: "image.lexica.art", host: "lexica.art" }
@@ -45,11 +51,9 @@ export function selectImage(images, cell, options = {}, runtime = {}) {
     return true;
   });
   if (options.resolution !== "allow_smaller") {
-    const native = pool.filter(image => {
-      const ratios = [width / Number(image.width), height / Number(image.height)];
-      const scale = options.scale === "fit" ? Math.min(...ratios) : Math.max(...ratios);
-      return scale <= 1;
-    });
+    const native = pool.filter(image =>
+      scaleFor(cell, image.width, image.height, options.scale === "fit") <= 1
+    );
     if (native.length || options.resolution === "native_only") pool = native;
   }
   if (!pool.length) return null;
@@ -113,13 +117,28 @@ function waitForImage(image, timeout) {
   });
 }
 
-function imageUrl(image) {
-  if (!allowedUrl(image.url, source(image).imageHost)) return "";
-  if (image.provider === "lexica") return image.url;
+// The sized Civitai route served up to 2200px in our CDN probes.
+const CIVITAI_SIZED_MAX = 2200;
+const CIVITAI_RENDITION = /\/(?:original=true|width=\d+[^/]*)\//;
+
+function imageUrls(image, cell, options) {
+  if (image.provider === "lexica") return [image.url];
   const url = new URL(image.url);
-  if (!url.pathname.includes("/original=true/")) return image.url;
-  url.pathname = url.pathname.replace("/original=true/", `/width=${Math.round(Number(image.width))}/`);
-  return url.href;
+  if (!CIVITAI_RENDITION.test(url.pathname)) return [image.url];
+
+  const scale = scaleFor(cell, image.width, image.height, options.scale === "fit");
+  const width = Math.max(1, Math.min(Number(image.width), Math.ceil(image.width * scale)));
+  const sized = new URL(url);
+  sized.pathname = url.pathname.replace(
+    CIVITAI_RENDITION, `/width=${Math.min(width, CIVITAI_SIZED_MAX)}/`
+  );
+  if (options.resolution === "allow_smaller" || scale > 1) return [sized.href];
+
+  url.pathname = url.pathname.replace(CIVITAI_RENDITION, "/original=true/");
+  if (width > CIVITAI_SIZED_MAX) {
+    return options.resolution === "native_only" ? [url.href] : [url.href, sized.href];
+  }
+  return options.resolution === "native_only" ? [sized.href, url.href] : [sized.href];
 }
 
 const activeRenders = new WeakMap();
@@ -153,6 +172,10 @@ export default async function render(shadow, ctx = {}) {
     return;
   }
 
+  const strict = options.resolution === "native_only";
+  const fit = options.scale === "fit";
+  let urls = imageUrls(image, cell, options);
+  let sizeMismatch = false;
   for (let attempt = 0; image && attempt < 3; attempt++) {
     const remaining = 12000 - (Date.now() - started);
     if (remaining <= 0) break;
@@ -168,18 +191,26 @@ export default async function render(shadow, ctx = {}) {
       : creditText;
     shadow.innerHTML = `${css}
       <div class="w is-bleed" data-widget="picture_civitai">
-        <img src="${escapeHtml(imageUrl(image))}" alt="${escapeHtml(image.username ? `Artwork by ${image.username}` : `${provider.name} artwork`)}" style="object-fit:${options.scale === "fit" ? "contain" : "cover"};">
+        <img src="${escapeHtml(urls.shift())}" alt="${escapeHtml(image.username ? `Artwork by ${image.username}` : `${provider.name} artwork`)}" style="object-fit:${fit ? "contain" : "cover"};">
         ${options.show_credit !== false ? `<div class="img-overlay"><span class="sub">${creditHtml}</span></div>` : ""}
       </div>`;
     const element = shadow.querySelector?.("img");
     if (!element) return;
     const loaded = await waitForImage(element, Math.max(0, Math.min(4000, 12000 - (Date.now() - started))));
     if (activeRenders.get(shadow) !== token || shadow.querySelector("img") !== element) return;
-    if (loaded) return;
+    if (loaded) {
+      if (!strict || scaleFor(cell, element.naturalWidth, element.naturalHeight, fit) <= 1) return;
+      sizeMismatch = true;
+    }
+    if (urls.length) continue;
     const failed = String(image.id ?? image.url);
     pool = pool.filter(candidate => candidate && String(candidate.id ?? candidate.url) !== failed);
     image = selectImage(pool, cell, options, runtime);
+    if (image) urls = imageUrls(image, cell, options);
   }
+  const message = sizeMismatch
+    ? "Downloaded artwork was too small for this cell's native resolution."
+    : "The artwork could not be loaded. Try refreshing this widget.";
   shadow.innerHTML = `${css}<div class="w is-bleed" data-widget="picture_civitai">
-    <div class="bleed-empty">The artwork could not be loaded. Try refreshing this widget.</div></div>`;
+    <div class="bleed-empty">${message}</div></div>`;
 }

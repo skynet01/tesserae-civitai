@@ -2,7 +2,7 @@
   "tesserae_compat": "1.x",
   "tesserae_min": "0.484.1",
   "name": "Picture, AI galleries",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "kind": "widget",
   "description": "Artwork from Civitai, Lexica or both. Filter by tags, creators or prompt terms, preview up to 20 matches, then rotate images that suit the cell orientation and resolution.",
   "icon": "ph-image",
@@ -116,7 +116,7 @@
         { "value": "native_only", "label": "Native size only" },
         { "value": "allow_smaller", "label": "Allow smaller images" }
       ],
-      "help": "Prefer native uses images that need no enlargement, falling back to smaller images only if none qualify. Native only shows no match instead. Based on the cell dimensions and Fit or Fill scale; enlargement uses ordinary browser resizing."
+      "help": "Native modes can download a larger original when needed. Native size only checks the downloaded dimensions and skips images that need enlargement. Allow smaller uses the lighter Civitai rendition when available. Fit or Fill and the target cell size determine whether enlargement is needed."
     },
     {
       "name": "tag_match",
@@ -278,7 +278,7 @@
       {
         "name": "images",
         "type": "arr",
-        "label": "Filtered image pool (service, ID, URL, dimensions, creator, link, tags or prompt, and engagement counts when available)"
+        "label": "Filtered image pool (service, ID, URL, dimensions, creator, link, and source priority)"
       },
       {
         "name": "placement_id",

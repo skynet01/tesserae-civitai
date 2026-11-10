@@ -101,7 +101,7 @@ The resolution option compares the source's original dimensions with the physica
 - **Native size only** shows an empty state if every matching image would need enlargement.
 - **Allow smaller images** rotates through both large and small matching images.
 
-For Fit, the required scale is `min(cell width / image width, cell height / image height)`. For Fill it is `max(...)`. A scale at or below 1 qualifies as native size. Images with unknown dimensions are skipped. The client requests public CDN images at their source width and uses ordinary browser resizing, with no AI upscaling or added detail.
+For Fit, the required scale is `min(cell width / image width, cell height / image height)`. For Fill it is `max(...)`. A scale at or below 1 qualifies as native size. Images with unknown dimensions are skipped. The widget requests a Civitai CDN rendition sized to the cell when available. Native modes can use the original when the needed size exceeds the sized CDN rendition. Native size only checks the decoded dimensions before showing an image. Original files can be substantially larger. Allow smaller uses ordinary browser resizing.
 
 ## Refresh and rotation
 
@@ -117,7 +117,7 @@ Civitai rotation also defers artwork from the same post or from the same creator
 
 Orientation, resolution and engagement filters still apply before rotation. A small eligible pool can repeat sooner than the chosen window. History records the selected primary image when Tesserae renders it; it is not a delivery acknowledgment from the display, and a CDN load failure can use a different cached image. Rotation and collection updates appear on the next Tesserae render; these options do not schedule display refreshes.
 
-If Civitai is temporarily unavailable, a previously cached pool for the identical filter configuration can remain visible. One shared refresh runs at a time, and a render waits at most 4.5 seconds before using cached content or showing an updating message. Requests and pagination are capped, with backoff after failures or rate limits. Candidate metadata is cached; images load from Civitai's image CDN. The renderer tries up to three eligible cached images within a 12-second total loading budget, then shows a load-failure message if needed. Image retries make no gallery API requests.
+If Civitai is temporarily unavailable, a previously cached pool for the identical filter configuration can remain visible. Warm renders reuse the parsed cache and skip the refresh worker. One shared refresh runs at a time, and a render waits at most 4.5 seconds for it before using cached content or showing an updating message. Requests and pagination are capped, with backoff after failures or rate limits. Gallery requests accept gzip and enforce limits on wire and decoded response sizes. The renderer makes up to three image download attempts within a 12-second total loading budget, including any native-resolution retry. Image retries make no gallery API requests.
 
 ## Tests
 

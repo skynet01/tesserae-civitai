@@ -218,9 +218,11 @@ function imageShadow(outcomes) {
       html = value;
       const src = value.match(/<img src="([^"]+)"/);
       if (!src) { current = undefined; return; }
-      const loaded = outcomes[attempts.length] === true;
+      const outcome = outcomes[attempts.length];
+      const [naturalWidth, naturalHeight] = Array.isArray(outcome) ? outcome
+        : outcome ? [2400, 1600] : [0, 0];
       attempts.push(src[1]);
-      current = { complete: true, naturalWidth: loaded ? 2400 : 0,
+      current = { complete: true, naturalWidth, naturalHeight,
         addEventListener() {}, removeEventListener() {}, async decode() {} };
     },
     querySelector() { return current; },
@@ -233,6 +235,52 @@ test("original CDN URLs use the actual source width without requesting an upscal
     url: "https://image.civitai.com/token/asset/original=true/painting.png",
   })] } });
   assert.deepEqual(shadow.attempts, ["https://image.civitai.com/token/asset/width=1024/painting.png"]);
+});
+
+test("Civitai downloads use the requested frame geometry and Fit or Fill", async () => {
+  const url = "https://image.civitai.com/token/asset/original=true/painting.png";
+  const data = { images: [image(1, 5120, 2560, { url })] };
+  for (const [scale, width] of [["fit", 800], ["fill", 1200]]) {
+    const shadow = imageShadow([true]);
+    await render(shadow, { cell: { w: 800, h: 600, options: { scale } }, data });
+    assert.deepEqual(shadow.attempts, [url.replace("original=true", `width=${width}`)]);
+  }
+});
+
+test("native-only mode verifies decoded size and can use the 4K original", async () => {
+  const url = "https://image.civitai.com/token/asset/original=true/painting.png";
+  const cell = { w: 3840, h: 2160, options: { resolution: "native_only" } };
+  const data = { images: [image(1, 5120, 2560, { url })] };
+  const full = imageShadow([[5120, 2560]]);
+  await render(full, { cell, data });
+  assert.deepEqual(full.attempts, [url]);
+  assert.match(full.innerHTML, /<img /);
+
+  const undersized = imageShadow([[2200, 1100]]);
+  await render(undersized, { cell, data });
+  assert.doesNotMatch(undersized.innerHTML, /<img /);
+});
+
+test("allow smaller keeps a 4K frame on the sized CDN rendition", async () => {
+  const url = "https://image.civitai.com/token/asset/original=true/painting.png";
+  const shadow = imageShadow([[2200, 1100]]);
+  await render(shadow, {
+    cell: { w: 3840, h: 2160, options: { resolution: "allow_smaller" } },
+    data: { images: [image(1, 5120, 2560, { url })] },
+  });
+  assert.deepEqual(shadow.attempts, [url.replace("original=true", "width=2200")]);
+  assert.match(shadow.innerHTML, /<img /);
+});
+
+test("strict native retries the original when the resized image decodes too small", async () => {
+  const url = "https://image.civitai.com/token/asset/original=true/painting.png";
+  const shadow = imageShadow([[800, 533], [2400, 1600]]);
+  await render(shadow, {
+    cell: { w: 1000, h: 600, options: { resolution: "native_only" } },
+    data: { images: [image(1, 2400, 1600, { url })] },
+  });
+  assert.deepEqual(shadow.attempts, [url.replace("original=true", "width=1000"), url]);
+  assert.match(shadow.innerHTML, /<img /);
 });
 
 test("a failed cached image retries another eligible image and keeps a successful result", async () => {

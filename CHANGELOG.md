@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- Size Civitai downloads to the frame, verify native image dimensions, and reduce API, cache, and render overhead.
 - Prefer different Civitai batches during rotation and add a Prioritize fresh art switch.
 - Choose tags, creators, and own or followed Civitai collections with source checkboxes and cached collection previews.
 - Ask for an exact tag name when a saved API key works but Civitai has no matching tag.

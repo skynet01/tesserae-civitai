@@ -297,7 +297,25 @@ def test_own_and_followed_collection_overlap_is_deduplicated(gallery):
         {**options, "collections": ["18707243", "55"]}, settings, ctx=ctx
     )
     assert len(result["images"]) == 1
-    assert set(result["images"][0]["collection_ids"]) == {"18707243", "55"}
+    assert set(result["images"][0]["matches"]) == {"Collection: 18707243", "Collection: 55"}
+    assert len(calls) == 2
+
+
+def test_collection_refreshes_after_its_cached_pool_expires(gallery, monkeypatch):
+    server, options, settings, ctx, calls, _ = gallery
+    now = server.time.time()
+    options = {**options, "refresh_hours": 1}
+    first = server.fetch(options, settings, ctx=ctx)
+    assert first["images"]
+    assert "live_refresh_s" not in first
+    assert len(calls) == 1
+    assert server.fetch(options, settings, ctx=ctx)["images"]
+    assert len(calls) == 1
+
+    monkeypatch.setattr(server.time, "time", lambda: now + 3601)
+    refreshed = server.fetch(options, settings, ctx=ctx)
+    assert refreshed["images"]
+    assert "live_refresh_s" not in refreshed
     assert len(calls) == 2
 
 

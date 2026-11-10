@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import contextlib
 import contextvars
+import gzip
 import hashlib
+import io
 import itertools
 import json
 import math
@@ -15,8 +17,10 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import zlib
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode, urlsplit
@@ -40,6 +44,7 @@ BATCH_HISTORY_LIMIT = 64
 SORTS = ("Most Reactions", "Most Collected", "Most Comments", "Newest")
 REACTION_FIELDS = ("cryCount", "laughCount", "likeCount", "heartCount")
 STAT_FIELDS = (*REACTION_FIELDS, "commentCount")
+ARTWORK_FIELDS = ("id", "url", "width", "height", "username", "permalink", "provider")
 _LOCK = threading.Lock()
 _HIST_LOCK = threading.Lock()
 _CHOICES_LOCK = threading.Lock()
@@ -96,7 +101,7 @@ def fetch_json(
     timeout: float = 2,
     max_bytes: int = MAX_CACHE_BYTES,
 ) -> Any:
-    """Fixed-domain HTTPS transport with a total body deadline and byte cap.
+    """Fixed-domain HTTPS transport with a body deadline and wire/decoded caps.
 
     DNS/connect are still subject to the operating system's timing; fetch()'s
     caller wait is bounded independently. read1 avoids a continuously streaming
@@ -108,8 +113,10 @@ def fetch_json(
         raise ValueError("Invalid Civitai network limits")
     deadline = time.monotonic() + timeout
     request = urllib.request.Request(url, headers=headers or {})
+    request.add_header("Accept-Encoding", "gzip")
     opener = _api_opener()
     with opener.open(request, timeout=timeout) as response:
+        encoding = response.headers.get("Content-Encoding", "identity").strip().lower()
         body = bytearray()
         while True:
             remaining = deadline - time.monotonic()
@@ -132,6 +139,18 @@ def fetch_json(
             body.extend(chunk)
             if len(body) > max_bytes:
                 raise ValueError("Civitai response exceeds byte cap")
+    if encoding == "gzip":
+        try:
+            with gzip.GzipFile(fileobj=io.BytesIO(body)) as stream:
+                body = stream.read(max_bytes + 1)
+        except (EOFError, OSError, zlib.error) as err:
+            raise FeedError("Gallery returned invalid compressed data.") from err
+        if len(body) > max_bytes:
+            raise ValueError("Civitai response exceeds byte cap")
+    elif encoding != "identity":
+        raise FeedError("Gallery returned an unsupported response encoding.")
+    if time.monotonic() >= deadline:
+        raise TimeoutError("Civitai response deadline exceeded")
     return json.loads(body.decode("utf-8"))
 
 
@@ -289,42 +308,60 @@ def _image(entry: Any) -> dict[str, Any] | None:
 
 def _load(path: Path) -> dict[str, Any]:
     try:
-        if path.stat().st_size <= MAX_CACHE_BYTES:
-            data = json.loads(path.read_text(encoding="utf-8"))
-            if (
-                isinstance(data, dict)
-                and isinstance(data.get("pools"), dict)
-                and isinstance(data.get("tags"), dict)
-            ):
-                pools = {
-                    key: record
-                    for key, record in list(data["pools"].items())[-8:]
-                    if isinstance(record, dict)
-                    and all(
-                        isinstance(record.get(field, 0), (int, float))
-                        and math.isfinite(record.get(field, 0))
-                        for field in ("fetched", "attempted", "retry_at")
-                    )
-                }
-                tags = {
-                    name: record
-                    for name, record in list(data["tags"].items())[-4096:]
-                    if isinstance(record, dict)
-                    and _integer(record.get("id"))
-                    and isinstance(record.get("at"), (int, float))
-                    and math.isfinite(record["at"])
-                }
-                retry = data.get("retry_at", 0)
-                return {
-                    "pools": pools,
-                    "tags": tags,
-                    "retry_at": retry
-                    if isinstance(retry, (int, float)) and math.isfinite(retry)
-                    else 0,
-                }
-    except (OSError, ValueError):
+        stat = path.stat()
+        if stat.st_size <= MAX_CACHE_BYTES:
+            version = (
+                stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns
+            )
+            snapshot = _load_snapshot(path, version)
+            # Callers replace records in these maps and leave their nested values read-only.
+            return {
+                **snapshot,
+                "pools": dict(snapshot["pools"]),
+                "tags": dict(snapshot["tags"]),
+            }
+    except (OSError, ValueError, OverflowError):
         pass
     return {"pools": {}, "tags": {}}
+
+
+@lru_cache(maxsize=4)
+def _load_snapshot(path: Path, _version: tuple[int, ...]) -> dict[str, Any]:
+    with path.open("rb") as handle:
+        body = handle.read(MAX_CACHE_BYTES + 1)
+    if len(body) > MAX_CACHE_BYTES:
+        return {"pools": {}, "tags": {}}
+    data = json.loads(body)
+    if (
+        not isinstance(data, dict)
+        or not isinstance(data.get("pools"), dict)
+        or not isinstance(data.get("tags"), dict)
+    ):
+        return {"pools": {}, "tags": {}}
+    pools = {
+        key: record
+        for key, record in list(data["pools"].items())[-8:]
+        if isinstance(record, dict)
+        and all(
+            isinstance(record.get(field, 0), (int, float))
+            and math.isfinite(record.get(field, 0))
+            for field in ("fetched", "attempted", "retry_at")
+        )
+    }
+    tags = {
+        name: record
+        for name, record in list(data["tags"].items())[-4096:]
+        if isinstance(record, dict)
+        and _integer(record.get("id"))
+        and isinstance(record.get("at"), (int, float))
+        and math.isfinite(record["at"])
+    }
+    retry = data.get("retry_at", 0)
+    return {
+        "pools": pools,
+        "tags": tags,
+        "retry_at": retry if isinstance(retry, (int, float)) and math.isfinite(retry) else 0,
+    }
 
 
 def _save(path: Path, state: dict[str, Any]) -> None:
@@ -371,6 +408,20 @@ def _cached_images(record: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def fetch(
+    options: dict[str, Any], settings: dict[str, Any], *, ctx: dict[str, Any]
+) -> dict[str, Any]:
+    result = _fetch_for_placement(options, settings, ctx=ctx)
+    keys = (*ARTWORK_FIELDS, "source_priority")
+    return {
+        **result,
+        "images": [
+            {key: image[key] for key in keys if key in image}
+            for image in result["images"]
+        ],
+    }
+
+
+def _fetch_for_placement(
     options: dict[str, Any], settings: dict[str, Any], *, ctx: dict[str, Any]
 ) -> dict[str, Any]:
     """Apply placement minimums and durable rotation to the shared image pool."""
@@ -519,7 +570,7 @@ def lineup_items(
         if store is not None
         else {}
     )
-    result = fetch(effective, settings, ctx=context)
+    result = _fetch_for_placement(effective, settings, ctx=context)
     images = _eligible_for_context(result.get("images"), effective, context)
     return [
         {
@@ -659,7 +710,7 @@ def query_preview(
     options: dict[str, Any], settings: dict[str, Any], *, ctx: dict[str, Any]
 ) -> dict[str, Any]:
     """Show the same eligible pool as a display, without advancing history."""
-    result = fetch(
+    result = _fetch_for_placement(
         {**options, "pinned_image": ""},
         settings,
         ctx={**ctx, "preview": True, "settled": False},
@@ -695,6 +746,7 @@ def query_preview(
             and isinstance(row.get("label"), str)
         }
     images = []
+    keys = (*ARTWORK_FIELDS, "prompt")
     for image in pool[:20]:
         matches = []
         if image.get("provider") == "lexica":
@@ -718,9 +770,8 @@ def query_preview(
                     f"Tag: {term}" for term in positives if term in names or term in ids
                 )
         thumbnail = _thumbnail(image)
-        images.append(
-            {**image, "thumbnail": thumbnail, "matches": matches or ["Public feed"]}
-        )
+        display = {key: image[key] for key in keys if key in image}
+        images.append({**display, "thumbnail": thumbnail, "matches": matches or ["Public feed"]})
     return {
         "images": images,
         "total": len(pool),
@@ -1006,13 +1057,11 @@ def _fetch_pool(
     metadata = {"placement_id": placement}
     if _integer(ctx.get("cell_w")) and _integer(ctx.get("cell_h")):
         metadata.update(target_w=ctx["cell_w"], target_h=ctx["cell_h"])
-    if ctx.get("_lineup_cache_only"):
-        return {**_fetch(options, settings, ctx, allow_network=False), **metadata}
+    cached = _fetch(options, settings, ctx, allow_network=False)
+    if ctx.get("_lineup_cache_only") or not cached.get("live_refresh_s"):
+        return {**cached, **metadata}
     if not _LOCK.acquire(blocking=False):
-        return {
-            **_fetch(options, settings, ctx, allow_network=False),
-            **metadata,
-        }
+        return {**cached, **metadata}
     result: list[dict[str, Any]] = []
     failures: list[BaseException] = []
     copied_context = contextvars.copy_context()
@@ -1039,12 +1088,10 @@ def _fetch_pool(
     worker.join(MAX_RENDER_WAIT_S)
     if failures:
         raise failures[0]
-    return {
-        **(
-            result[0] if result else _fetch(options, settings, ctx, allow_network=False)
-        ),
-        **metadata,
-    }
+    if result:
+        return {**result[0], **metadata}
+    # Another source in this refresh may already have written a usable pool.
+    return {**_fetch(options, settings, ctx, allow_network=False), **metadata}
 
 
 def _prompt_match(prompt: str, term: str) -> bool:
@@ -1162,7 +1209,7 @@ def _fetch_lexica(
         _save(path, state)
     elif not fresh and now < state.get("retry_at", 0):
         metadata = {"error": "Lexica is rate limited. Try again shortly."}
-    elif not fresh and not allow_network:
+    elif not fresh and not allow_network and now >= record.get("retry_at", 0):
         metadata = {
             "error": "Lexica collection is updating. Try again shortly.",
             "live_refresh_s": 2,
@@ -1407,6 +1454,7 @@ def _fetch_collections(
                     if (clean := _collection_image(entry, ident))
                 ]
                 record = {"images": images, "fetched": now, "attempted": now}
+                fresh = True
             except (OSError, ValueError, TimeoutError) as err:
                 delay = _collection_retry_delay(err)
                 if isinstance(err, urllib.error.HTTPError) and err.code == 429:
@@ -1435,10 +1483,9 @@ def _fetch_collections(
         if record.get("error"):
             result["error"] = record["error"]
         elif not fresh and not record.get("fetched"):
-            result.update(
-                error="This collection is updating. Try again shortly.",
-                live_refresh_s=2,
-            )
+            result["error"] = "This collection is updating. Try again shortly."
+        if not fresh and now >= max(state.get("retry_at", 0), record.get("retry_at", 0)):
+            result["live_refresh_s"] = 2
         if images and result.get("error"):
             result["stale"] = True
         feeds.append((f"Collection {ident}", result))
