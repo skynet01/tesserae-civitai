@@ -15,6 +15,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
@@ -34,6 +35,8 @@ STYLE_TAG_IDS = {"drawing": 81, "illustration": 5145, "painting": 7660}
 MAX_CALLS = 16
 MAX_IMAGE_CALLS = 8
 MAX_CACHE_BYTES = 2 * 1024 * 1024
+BATCH_GAP_SECONDS = 5 * 60
+BATCH_HISTORY_LIMIT = 64
 SORTS = ("Most Reactions", "Most Collected", "Most Comments", "Newest")
 REACTION_FIELDS = ("cryCount", "laughCount", "likeCount", "heartCount")
 STAT_FIELDS = (*REACTION_FIELDS, "commentCount")
@@ -258,6 +261,18 @@ def _image(entry: Any) -> dict[str, Any] | None:
     stats = _stats(entry.get("stats"))
     if stats:
         clean["stats"] = stats
+    if _integer(entry.get("postId")):
+        clean["postId"] = entry["postId"]
+    posted = entry.get("created_at")
+    if not _integer(posted):
+        raw_date = entry.get("createdAt")
+        if isinstance(raw_date, str) and len(raw_date) <= 40:
+            with contextlib.suppress(ValueError, OverflowError, OSError):
+                date = datetime.fromisoformat(raw_date)
+                if date.tzinfo is not None:
+                    posted = int(date.timestamp())
+    if _integer(posted):
+        clean["created_at"] = posted
     collections = entry.get("collection_ids")
     if isinstance(collections, list):
         clean["collection_ids"] = [
@@ -776,6 +791,31 @@ def _history_id(value: Any) -> bool:
     )
 
 
+def _art_batch(image: dict[str, Any]) -> tuple[int, str, int]:
+    post = image.get("postId", 0)
+    posted = image.get("created_at", 0)
+    creator = image.get("username", "").strip().casefold()
+    author = (
+        hashlib.blake2s(creator.encode(errors="replace"), digest_size=8).hexdigest()
+        if creator and posted
+        else ""
+    )
+    return post, author, posted
+
+
+def _same_batch(first: tuple[int, str, int], second: tuple[int, str, int]) -> bool:
+    post, author, posted = first
+    other_post, other_author, other_posted = second
+    return bool(
+        (post and post == other_post)
+        or (
+            author
+            and author == other_author
+            and abs(posted - other_posted) <= BATCH_GAP_SECONDS
+        )
+    )
+
+
 def _read_history(path: Path) -> dict[str, Any]:
     try:
         with path.open("rb") as handle:
@@ -805,9 +845,27 @@ def _read_history(path: Path) -> dict[str, Any]:
                 if isinstance(seen, dict)
                 else {}
             )
+            seen = dict(sorted(seen.items(), key=lambda item: item[1])[-512:])
+            batches = record.get("batches")
+            valid_batches = {}
+            if isinstance(batches, dict):
+                for ident in seen:
+                    batch = batches.get(ident)
+                    if (
+                        isinstance(batch, list)
+                        and len(batch) == 3
+                        and type(batch[0]) is int
+                        and 0 <= batch[0] <= 2**53 - 1
+                        and isinstance(batch[1], str)
+                        and re.fullmatch(r"[0-9a-f]{16}|", batch[1]) is not None
+                        and type(batch[2]) is int
+                        and 0 <= batch[2] <= 2**53 - 1
+                    ):
+                        valid_batches[ident] = tuple(batch)
             cleaned[key] = {
                 "updated": record["updated"],
-                "seen": dict(sorted(seen.items(), key=lambda item: item[1])[-512:]),
+                "seen": seen,
+                "batches": dict(list(valid_batches.items())[-BATCH_HISTORY_LIMIT:]),
                 "bucket": record.get("bucket")
                 if isinstance(record.get("bucket"), str)
                 and len(record["bucket"]) <= 100
@@ -898,6 +956,18 @@ def _select_rotation(
             image for image in pool if seen.get(str(image["id"]), -math.inf) <= cutoff
         ]
         candidates = rested if repeat_days and rested else pool
+        batches = record.get("batches", {})
+        recent_batches = [
+            batch for ident, batch in batches.items() if seen.get(ident, -math.inf) > cutoff
+        ]
+        if recent_batches and rested:
+            unrelated = []
+            for image in rested:
+                batch = _art_batch(image)
+                if not any(_same_batch(batch, recent) for recent in recent_batches):
+                    unrelated.append(image)
+            candidates = unrelated or rested
+        prioritize_fresh = options.get("prioritize_fresh") is True
 
         def order(image: dict[str, Any]) -> tuple[Any, ...]:
             ident = str(image["id"])
@@ -905,18 +975,24 @@ def _select_rotation(
             tie = hashlib.sha256(f"{key}:{bucket}:{ident}".encode()).hexdigest()
             if repeat_days and not rested:
                 return seen.get(ident, -math.inf), priority, tie
-            return priority, tie
+            return priority, -image.get("created_at", 0) if prioritize_fresh else 0, tie
 
         selected = min(candidates, key=order)
         preview = bool(ctx.get("preview"))
         if not preview and ctx.get("settled", not preview):
             # This records the scheduled primary, not a delivery acknowledgement.
             # A client-side image-load fallback does not write another history entry.
+            ident = str(selected["id"])
+            batch = _art_batch(selected)
+            if batch[0] or batch[1]:
+                batches.pop(ident, None)
+                batches[ident] = batch
             records[key] = {
                 "updated": now,
-                "seen": {**seen, str(selected["id"]): now},
+                "seen": {**seen, ident: now},
+                "batches": dict(list(batches.items())[-BATCH_HISTORY_LIMIT:]),
                 "bucket": bucket,
-                "selected": str(selected["id"]),
+                "selected": ident,
             }
             _write_history(path, records)
     return {**result, "selected_id": selected["id"]}
@@ -1130,6 +1206,8 @@ def _fetch(
         return _merge_pools([("Civitai", civitai), ("Lexica", lexica)])
     if options.get("provider") == "lexica":
         return _fetch_lexica(options, ctx, allow_network=allow_network)
+    if options.get("prioritize_fresh") is True:
+        options = {**options, "sort": "Newest"}
     sources = options.get("sources", ["tags", "creators"])
     if not isinstance(sources, list) or any(
         value not in ("tags", "creators", "collections") for value in sources

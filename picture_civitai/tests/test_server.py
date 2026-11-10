@@ -54,6 +54,21 @@ def test_drawing_style_uses_verified_image_tag_without_discovery(
     assert parse_qs(urlsplit(calls[0]).query)["tags"] == ["81"]
 
 
+def test_fresh_art_requests_newest_and_keeps_batch_fields_in_the_cache(server, monkeypatch, tmp_path):
+    def response(url, query):
+        assert query["sort"] == ["Newest"]
+        assert query["period"] == ["Week"]
+        return {"items": [image(createdAt="2026-11-07T00:00:00Z", postId=10)]}
+
+    calls = fake_network(monkeypatch, server, response)
+    options = {"sort": "Most Reactions", "prioritize_fresh": True}
+    for _ in range(2):
+        result = server.fetch(options, {}, ctx={"data_dir": str(tmp_path)})
+        assert result["images"][0]["postId"] == 10
+        assert result["images"][0]["created_at"] == 1794009600
+    assert len(calls) == 1
+
+
 def test_domain_transport_runs_under_host_scope_and_denies_other_targets(
     server, monkeypatch
 ):

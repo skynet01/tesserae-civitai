@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- Prefer different Civitai batches during rotation and add a Prioritize fresh art switch.
 - Choose tags, creators, and own or followed Civitai collections with source checkboxes and cached collection previews.
 - Ask for an exact tag name when a saved API key works but Civitai has no matching tag.
 - Combine Civitai and Lexica with shared rotation, separate caches and fallback when a service is unavailable.

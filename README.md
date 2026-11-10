@@ -107,9 +107,13 @@ For Fit, the required scale is `min(cell width / image width, cell height / imag
 
 **Prioritize** chooses **Most reactions** (default), **Most collected**, **Most comments** or **Newest**. Civitai ranks the candidate collection using that order and the source time period (Month by default). Rotation then cycles through eligible cached matches. Changing priority fetches a separate collection once; switching back reuses it until its refresh is due. These sorts are supported by [Civitai's image API](https://github.com/civitai/civitai-developer-docs/blob/main/site/reference/images.md).
 
+**Prioritize fresh art** uses Civitai's newest results and prefers more recently posted eligible art within each source priority. It uses the configured collection refresh interval.
+
 The candidate pool refreshes every 24 hours by default. The illustration/painting preset normally needs two image-list requests per refresh and no tag lookups. An empty source can follow one additional cursor, within a total cap of eight image-list requests. Renders and placements with the same source filters share the persistent cache; changing orientation, resolution or engagement minimums does not make another API request. Custom tag-name lookups are cached for 30 days. **More options** contains engagement minimums, collection refresh, image rotation, time period, scale, tag matching and creator credit controls.
 
 Image rotation defaults to 60 minutes. The choice stays stable within each time interval for each placement, including when the collection refreshes or changes order. **More options > Avoid repeats (days)** defaults to seven days. A small persistent history file remembers each placement's scheduled picks across collection refreshes and restarts; editor previews read that history without advancing it. Creator images get priority among picks outside the repeat window. Once all eligible images are recent, the oldest pick is reused. Set the lookback to `0` to disable it.
+
+Civitai rotation also defers artwork from the same post or from the same creator within five minutes when other eligible picks are available. It uses metadata from the existing gallery response and keeps batch details for the last 64 Civitai picks that had them.
 
 Orientation, resolution and engagement filters still apply before rotation. A small eligible pool can repeat sooner than the chosen window. History records the selected primary image when Tesserae renders it; it is not a delivery acknowledgment from the display, and a CDN load failure can use a different cached image. Rotation and collection updates appear on the next Tesserae render; these options do not schedule display refreshes.
 

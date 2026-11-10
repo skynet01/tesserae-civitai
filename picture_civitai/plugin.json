@@ -2,7 +2,7 @@
   "tesserae_compat": "1.x",
   "tesserae_min": "0.484.1",
   "name": "Picture, AI galleries",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "kind": "widget",
   "description": "Artwork from Civitai, Lexica or both. Filter by tags, creators or prompt terms, preview up to 20 matches, then rotate images that suit the cell orientation and resolution.",
   "icon": "ph-image",
@@ -169,7 +169,17 @@
       "min": 0,
       "max": 30,
       "advanced": true,
-      "help": "Prefer artwork not selected for this placement within this window (7 days by default). Use a whole number; 0 disables the lookback. History survives collection refreshes. If every eligible image is recent, reuse the oldest pick. Previews do not advance history."
+      "help": "Prefer artwork not shown here within this window, including Civitai variants from the same post or from the same creator within five minutes. Use a whole number. Set 0 to disable repeat avoidance. If the pool is small, variants or repeats can appear sooner."
+    },
+    {
+      "name": "prioritize_fresh",
+      "type": "boolean",
+      "label": "Prioritize fresh art",
+      "default": false,
+      "help": "Fetch Civitai's newest results and prefer newer eligible art within each source priority. This overrides the Prioritize menu while enabled and uses the existing refresh schedule.",
+      "show_if": {
+        "provider": ["civitai", "both"]
+      }
     },
     {
       "name": "sort",
