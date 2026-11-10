@@ -33,8 +33,12 @@ Add **Picture, AI galleries** as the only widget on a full-display page for a fu
 ## Filters
 
 - **Include tags:** comma- or newline-separated names or numeric tag IDs. Tag discoveries match any included tag by default (OR); **More options > Include tag matching > All tags** requires every tag for those discoveries.
+
 - **Creators:** comma- or newline-separated Civitai usernames. Creator artwork takes priority and does not need an included tag. Tag discoveries provide additional candidates after eligible creator picks have been used recently. Exclusions and engagement minimums still apply to both sources.
 - **Exclude tags:** every exclusion applies. An image with any excluded tag is rejected, including when that tag is also included. Names and numeric IDs are supported.
+
+Civitai names must match an image tag exactly, including words and plural forms; for example, `outdoors` is different
+from `outdoor`. Spaces within a name are supported. An API key enables lookup but does not turn arbitrary phrases into tags.
 
 Creator filters, negative tag names and the default illustration/painting preset work without an API key. The preset's verified image tag IDs are built in, so it needs no tag lookup requests. Without a key, other positive tag names are resolved from a sample of the popular public feed; names absent from that sample produce a message asking for an API key or numeric tag ID. This sample is not Civitai's complete tag index.
 

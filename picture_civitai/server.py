@@ -1181,9 +1181,12 @@ def _fetch(
                         sampled = True
                     saved = state["tags"].get(f"{identity}:{term}", {})
                 if not _integer(saved.get("id")):
-                    raise FeedError(
-                        f"Could not find image tag '{term}'. Add a Civitai API key in widget settings for tag lookup, or enter its numeric tag ID."
+                    hint = (
+                        "Use the exact Civitai image tag name or its numeric tag ID."
+                        if api_key
+                        else "Add a Civitai API key in widget settings for tag lookup, or enter its numeric tag ID."
                     )
+                    raise FeedError(f"Could not find image tag '{term}'. {hint}")
                 resolved.append(saved["id"])
         except FeedError as err:
             if not users:

@@ -280,6 +280,31 @@ def test_unknown_positive_tag_name_is_an_error_without_unfiltered_feed(
     assert "/trpc/" not in calls[0]
 
 
+@pytest.mark.parametrize("users", ["", "alice"])
+def test_unknown_tag_with_saved_key_requests_exact_name_instead_of_another_key(
+    server, monkeypatch, tmp_path, users
+):
+    def response(url, query):
+        if "/trpc/" in url:
+            return {
+                "result": {
+                    "data": {"json": {"items": [{"id": 111763, "name": "outdoors"}]}}
+                }
+            }
+        return {"items": [image()]}
+
+    fake_network(monkeypatch, server, response)
+    result = server.fetch(
+        {"positive_tags": "outdoor", "users": users},
+        {"api_key_secret": "valid-test-key"},
+        ctx={"data_dir": str(tmp_path)},
+    )
+    message = result.get("warning", result.get("error", ""))
+    assert "outdoor" in message
+    assert "exact" in message.lower()
+    assert "add a civitai api key" not in message.lower()
+
+
 def test_public_sample_discovers_positive_names_without_authentication(
     server, monkeypatch, tmp_path
 ):
