@@ -1,6 +1,16 @@
-# Civitai picture widget for Tesserae
+# AI gallery picture widget for Tesserae
 
-Rotating artwork from [Civitai](https://civitai.com) for [Tesserae](https://github.com/dmellok/tesserae). Images fill the widget area, with an optional quiet creator credit. Configuration uses Tesserae's normal widget settings and cell options.
+Rotating artwork from [Civitai](https://civitai.com) or [Lexica](https://lexica.art) for [Tesserae](https://github.com/dmellok/tesserae). Images fill the widget area, with an optional quiet creator credit. Configuration uses Tesserae's normal widget settings and cell options. The widget ID remains `picture_civitai`, and existing dashboards keep using Civitai.
+
+## Query preview and gallery choice
+
+Choose **Gallery service** in the widget options. **Preview query** opens a popup with up to 20 images from the eligible cached collection, using the current unsaved filters and target cell dimensions. Badges over each image show the matching creator and included tags, or the Lexica search and matching prompt terms. Click an image to open its original page. Preview does not advance rotation or change repeat history. Counts describe the bounded cached collection, rather than every result available from the service.
+
+The preview button requires Tesserae's query-preview editor hook (included in the companion core change). Older hosts can still render the widget and choose a gallery, but do not show the button.
+
+**Lexica search** accepts a description of up to 300 characters. Lexica's public API returns up to 50 candidates per search. Included terms must occur in each image's generation prompt (Any or All); excluded terms reject matching prompts. These are literal text checks, not Civitai tags or visual content recognition. Clear included terms to accept all safe search results. Creator, popularity, time-period and engagement filters apply only to Civitai and are hidden for Lexica. Orientation, resolution, rotation and repeat avoidance work with both services. Lexica candidates must explicitly have `nsfw: false` and `grid: false`.
+
+Lexica uses no Civitai API key. Its cache is separate, and requests are limited to the documented search endpoint and image CDN. On 2026-11-10, live verification returned HTTP 500 for three searches; mocked-response integration tests cover success and failure, but live Lexica image retrieval could not be verified.
 
 ![Painted artwork on a portrait Tesserae cell](screenshots/lg.png)
 
@@ -12,7 +22,7 @@ Requires Tesserae 0.484.1 or newer. Folder shipped: `picture_civitai`.
 
 Install through **Settings > Widgets > Browse community widgets** when this repository is listed in the catalog. For a manual installation, copy the `picture_civitai` folder into your Tesserae checkout's `plugins/` folder and restart Tesserae. Keep the folder name: it is the widget ID.
 
-Add **Picture, Civitai** as the only widget on a full-display page for a full-screen art frame. It starts with edge-to-edge **Fill** scaling and automatic orientation, showing **illustration or painting**, excluding **photography and photorealistic** tags, sorted by most reactions for the month. Leaving tags and creators blank uses the general public SFW image feed.
+Add **Picture, AI galleries** as the only widget on a full-display page for a full-screen art frame. It starts with edge-to-edge **Fill** scaling and automatic orientation, showing **illustration or painting**, excluding **photography and photorealistic** tags, sorted by most reactions for the month. Leaving tags and creators blank uses the general public SFW image feed.
 
 ## Filters
 
@@ -26,13 +36,13 @@ Creator filters, negative tag names and the default illustration/painting preset
 
 Minimums filter the existing cached collection locally. Raising, lowering or disabling a minimum makes no additional API requests. Counts update when the collection refreshes; a narrow threshold can exhaust the sampled pool, in which case the widget asks you to lower it or wait for the next refresh. Upgrading from a release that did not cache counts fetches the collection once to populate them.
 
-For full positive tag-name lookup, create a free personal API key at [Civitai account settings](https://civitai.com/user/account) and save it in **Settings > Plugins > Picture, Civitai > Civitai API key**. Tesserae stores it as a secret and does not send it to the widget client. The widget uses Civitai's public image API and an internal tRPC image-tag lookup endpoint. The internal endpoint requires authentication and may change independently of the public API.
+For full positive tag-name lookup, create a free personal API key at [Civitai account settings](https://civitai.com/user/account) and save it in **Settings > Plugins > Picture, AI galleries > Civitai API key**. Tesserae stores it as a secret and does not send it to the widget client. The widget uses Civitai's public image API and an internal tRPC image-tag lookup endpoint. The internal endpoint requires authentication and may change independently of the public API.
 
 Only public images marked SFW by Civitai are requested. Filtering depends on Civitai's metadata; it does not inspect image contents. Candidate collection is bounded, so narrow combinations can have no matches even when matching images exist elsewhere on Civitai.
 
 Creator sources are fetched first, followed by independent tag sources, with at most eight sources total. When both have matches, the cache reserves up to 75 creator images and 25 tag discoveries, filling unused space from either side. A creator match wins if both sources contain the same image. If a tag name cannot be resolved, valid creator picks remain available with a warning.
 
-The manifest limits network access to `civitai.com` and `image.civitai.com`. The widget accepts only its two fixed HTTPS API paths, rejects redirects outside them, and validates image URLs against the image CDN. Downloads use normal TLS verification and enforce response deadlines and size limits.
+The manifest limits network access to `civitai.com`, `image.civitai.com`, `lexica.art` and `image.lexica.art`. The widget accepts only the two fixed Civitai HTTPS API paths and Lexica's search endpoint, rejects redirects between services or outside those paths, and validates image URLs against each service's image CDN. Civitai authentication is never sent to Lexica. Downloads use normal TLS verification and enforce response deadlines and size limits.
 
 ## Orientation and image size
 

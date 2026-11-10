@@ -18,6 +18,22 @@ function image(id, width, height, extra = {}) {
 const landscape = { w: 1600, h: 1200 };
 const portrait = { w: 600, h: 900 };
 
+test("Lexica artwork renders with its own credit and strict CDN", async () => {
+  const artwork = image("lexica:0482ee68-0368-4eca-8846-5930db866b33", 2400, 1600, {
+    provider: "lexica", username: "", url: "https://image.lexica.art/md/0482ee68-0368-4eca-8846-5930db866b33",
+    permalink: "https://lexica.art/?q=0482ee68-0368-4eca-8846-5930db866b33",
+  });
+  assert.equal(selectImage([artwork], landscape, {}, { now: 0 }).id, artwork.id);
+  const shadow = { innerHTML: "" };
+  await render(shadow, { cell: landscape, data: { images: [artwork] } });
+  assert.match(shadow.innerHTML, /src="https:\/\/image.lexica.art/);
+  assert.match(shadow.innerHTML, />Lexica<\/a>/);
+  assert.doesNotMatch(shadow.innerHTML, /Civitai artwork/);
+  for (const url of ["https://image.lexica.art.evil.test/a", "http://image.lexica.art/a", "https://image.civitai.com/a"]) {
+    assert.equal(selectImage([{...artwork, url}], landscape), null);
+  }
+});
+
 test("auto orientation follows the cell even on an oppositely oriented panel", () => {
   const images = [image(1, 2400, 1600), image(2, 1200, 1800)];
   assert.equal(selectImage(images, portrait, {}, { now: 0 }).id, 2);

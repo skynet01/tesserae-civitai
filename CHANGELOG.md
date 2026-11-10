@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- Add a query preview with matched tags and creators, and a choice of Civitai or Lexica.
 - Prefer creator artwork, add tag discoveries, and remember recent picks across collection refreshes.
 - Add minimum reaction and comment filters that reuse the cached collection.
 - Add Most collected and Most comments priorities alongside Most reactions and Newest.

@@ -22,6 +22,8 @@ from urllib.parse import urlencode, urlsplit
 
 API_URL = "https://civitai.com/api/v1/images"
 TAG_URL = "https://civitai.com/api/trpc/tag.getAll"
+LEXICA_URL = "https://lexica.art/api/v1/search"
+LEXICA_ID = r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}"
 MAX_IMAGES = 100
 MAX_RENDER_WAIT_S = 4.5
 REFRESH_DEADLINE_S = 4.0
@@ -47,8 +49,12 @@ def _api_url(url: str) -> bool:
         parsed = urlsplit(url)
         return (
             parsed.scheme == "https"
-            and parsed.netloc == "civitai.com"
-            and parsed.path in ("/api/v1/images", "/api/trpc/tag.getAll")
+            and (parsed.netloc, parsed.path)
+            in (
+                ("civitai.com", "/api/v1/images"),
+                ("civitai.com", "/api/trpc/tag.getAll"),
+                ("lexica.art", "/api/v1/search"),
+            )
             and not parsed.fragment
         )
     except ValueError:
@@ -57,8 +63,11 @@ def _api_url(url: str) -> bool:
 
 class _ApiRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
-        if not _api_url(newurl):
-            raise FeedError("Civitai redirected outside its supported API.")
+        if (
+            not _api_url(newurl)
+            or urlsplit(newurl).netloc != urlsplit(req.full_url).netloc
+        ):
+            raise FeedError("Gallery redirected outside its supported API.")
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
@@ -85,9 +94,7 @@ def fetch_json(
     body extending the shared refresh indefinitely between deadline checks.
     """
     if not _api_url(url):
-        raise FeedError(
-            "Only the fixed Civitai image and image-tag APIs are supported."
-        )
+        raise FeedError("Only the fixed Civitai and Lexica APIs are supported.")
     if not 0 < timeout <= 2 or not 0 < max_bytes <= MAX_CACHE_BYTES:
         raise ValueError("Invalid Civitai network limits")
     deadline = time.monotonic() + timeout
@@ -178,7 +185,7 @@ def _image_url(value: Any) -> bool:
         parsed = urlsplit(value)
         return (
             parsed.scheme == "https"
-            and parsed.netloc == "image.civitai.com"
+            and parsed.netloc in ("image.civitai.com", "image.lexica.art")
             and not parsed.fragment
             and bool(parsed.path)
             and not parsed.path.casefold().endswith(
@@ -215,6 +222,7 @@ def _image(entry: Any) -> dict[str, Any] | None:
         return None
     if (
         not _image_url(entry.get("url"))
+        or urlsplit(entry["url"]).netloc != "image.civitai.com"
         or not _integer(entry.get("width"))
         or not _integer(entry.get("height"))
         or entry["width"] > 50000
@@ -334,9 +342,23 @@ def fetch(
     options: dict[str, Any], settings: dict[str, Any], *, ctx: dict[str, Any]
 ) -> dict[str, Any]:
     """Apply placement minimums and durable rotation to the shared image pool."""
+    provider = options.get("provider", "civitai")
+    if provider not in ("civitai", "lexica"):
+        return {
+            "images": [],
+            "error": "Choose Civitai or Lexica as the gallery service.",
+        }
     try:
-        reactions = _minimum(options.get("min_reactions", 0), "reactions")
-        comments = _minimum(options.get("min_comments", 0), "comments")
+        reactions = (
+            _minimum(options.get("min_reactions", 0), "reactions")
+            if provider == "civitai"
+            else 0
+        )
+        comments = (
+            _minimum(options.get("min_comments", 0), "comments")
+            if provider == "civitai"
+            else 0
+        )
     except FeedError as err:
         return {"images": [], "error": str(err)}
     try:
@@ -376,6 +398,67 @@ def fetch(
     return _select_rotation(result, options, ctx, repeat_days)
 
 
+def query_preview(
+    options: dict[str, Any], settings: dict[str, Any], *, ctx: dict[str, Any]
+) -> dict[str, Any]:
+    """Show the same eligible pool as a display, without advancing history."""
+    result = fetch(options, settings, ctx={**ctx, "preview": True, "settled": False})
+    if not result.get("images"):
+        return {**result, "total": 0}
+    width, height = ctx.get("cell_w"), ctx.get("cell_h")
+    if not _integer(width) or not _integer(height):
+        return {
+            "images": [],
+            "total": 0,
+            "error": "Choose a target cell size to preview these filters.",
+        }
+    pool = _rotation_candidates(result.get("images"), options, width, height)
+    positives = _terms(options.get("positive_tags", ""), 6, "positive tags")
+    users = (
+        _terms(options.get("users", ""), 4, "creators")
+        if options.get("provider", "civitai") == "civitai"
+        else []
+    )
+    images = []
+    for image in pool[:20]:
+        matches = []
+        if image.get("provider") == "lexica":
+            matches.append(f"Search: {options.get('lexica_query', '').strip()}")
+            matches.extend(
+                f"Prompt: {term}"
+                for term in positives
+                if _prompt_match(image["prompt"], term)
+            )
+        else:
+            if image["username"].casefold() in users:
+                matches.append(f"Creator: {image['username']}")
+            names = {tag["name"].casefold() for tag in image["tags"]}
+            ids = {str(tag["id"]) for tag in image["tags"]}
+            matches.extend(
+                f"Tag: {term}" for term in positives if term in names or term in ids
+            )
+        thumbnail = image.get("thumbnail", image["url"])
+        if image.get("provider") != "lexica":
+            thumbnail = re.sub(
+                r"/(?:original=true|width=\d+[^/]*)/",
+                "/width=480/",
+                image["url"],
+                count=1,
+            )
+        images.append(
+            {**image, "thumbnail": thumbnail, "matches": matches or ["Public feed"]}
+        )
+    return {
+        "images": images,
+        "total": len(pool),
+        **{
+            key: result[key]
+            for key in ("error", "warning", "stale", "live_refresh_s")
+            if key in result
+        },
+    }
+
+
 def _rotation_candidates(
     images: Any, options: dict[str, Any], width: int, height: int
 ) -> list[dict[str, Any]]:
@@ -391,7 +474,10 @@ def _rotation_candidates(
     for image in images if isinstance(images, list) else []:
         if (
             not isinstance(image, dict)
-            or not _integer(image.get("id"))
+            or not (
+                _integer(image.get("id"))
+                or (image.get("provider") == "lexica" and _history_id(image.get("id")))
+            )
             or not _integer(image.get("width"))
             or not _integer(image.get("height"))
             or not _image_url(image.get("url"))
@@ -423,10 +509,12 @@ def _history_time(value: Any) -> bool:
 
 
 def _history_id(value: Any) -> bool:
-    return (
-        isinstance(value, str)
-        and re.fullmatch(r"[1-9][0-9]{0,15}", value) is not None
-        and int(value) <= 2**53 - 1
+    return isinstance(value, str) and (
+        (
+            re.fullmatch(r"[1-9][0-9]{0,15}", value) is not None
+            and int(value) <= 2**53 - 1
+        )
+        or re.fullmatch(f"lexica:{LEXICA_ID}", value) is not None
     )
 
 
@@ -623,6 +711,147 @@ def _fetch_pool(
     }
 
 
+def _prompt_match(prompt: str, term: str) -> bool:
+    return (
+        re.search(r"(?<!\w)" + re.escape(term) + r"(?!\w)", prompt.casefold())
+        is not None
+    )
+
+
+def _lexica_image(entry: Any) -> dict[str, Any] | None:
+    if not isinstance(entry, dict):
+        return None
+    ident = entry.get("id")
+    if not isinstance(ident, str) or re.fullmatch(LEXICA_ID, ident) is None:
+        return None
+    if (
+        entry.get("nsfw") is not False
+        or entry.get("grid") is not False
+        or not _integer(entry.get("width"))
+        or not _integer(entry.get("height"))
+        or max(entry["width"], entry["height"]) > 50000
+        or not isinstance(entry.get("prompt"), str)
+        or len(entry["prompt"]) > 8000
+        or not _image_url(entry.get("src"))
+        or urlsplit(entry["src"]).netloc != "image.lexica.art"
+    ):
+        return None
+    thumbnail = entry.get("srcSmall")
+    return {
+        "id": f"lexica:{ident}",
+        "provider": "lexica",
+        "url": entry["src"],
+        "thumbnail": thumbnail
+        if _image_url(thumbnail) and urlsplit(thumbnail).netloc == "image.lexica.art"
+        else entry["src"],
+        "width": entry["width"],
+        "height": entry["height"],
+        "prompt": entry["prompt"],
+        "permalink": f"https://lexica.art/?q={ident}",
+        "username": "",
+        "tags": [],
+        "source_priority": 1,
+    }
+
+
+def _fetch_lexica(
+    options: dict[str, Any], ctx: dict[str, Any], *, allow_network: bool
+) -> dict[str, Any]:
+    try:
+        query = options.get("lexica_query", "")
+        if not isinstance(query, str) or not 1 <= len(query.strip()) <= 300:
+            raise FeedError("Enter a Lexica search of 1 to 300 characters.")
+        query = query.strip()
+        positives = _terms(options.get("positive_tags", ""), 6, "positive prompt terms")
+        negatives = _terms(
+            options.get("negative_tags", ""), 50, "negative prompt terms"
+        )
+        match = options.get("tag_match", "any")
+        if match not in ("any", "all"):
+            raise FeedError("Choose Any or All for prompt matching.")
+        refresh = float(options.get("refresh_hours", 24))
+        if not 1 <= refresh <= 168:
+            raise FeedError("Choose a collection refresh between 1 and 168 hours.")
+    except (FeedError, TypeError, ValueError) as err:
+        return {
+            "images": [],
+            "error": str(err)
+            if isinstance(err, FeedError)
+            else "Check the collection refresh setting.",
+        }
+    path = Path(ctx["data_dir"]) / "lexica-cache.json"
+    state = _load(path)
+    key = hashlib.sha256(query.encode()).hexdigest()
+    record = state["pools"].get(key, {})
+    now = time.time()
+    metadata = {}
+    fresh = 0 <= now - record.get("fetched", 0) < refresh * 3600
+    if (
+        not fresh
+        and now >= max(record.get("retry_at", 0), state.get("retry_at", 0))
+        and allow_network
+    ):
+        try:
+            response = fetch_json(
+                f"{LEXICA_URL}?{urlencode({'q': query})}",
+                headers={
+                    "Accept": "application/json",
+                    "User-Agent": "tesserae (+picture_civitai)",
+                },
+            )
+            if not isinstance(response, dict) or not isinstance(
+                response.get("images"), list
+            ):
+                raise FeedError("Lexica returned an unreadable image collection.")
+            raw = [entry for entry in response["images"][:50] if _lexica_image(entry)]
+            record = {"images": raw, "fetched": now, "attempted": now}
+        except (OSError, ValueError, TimeoutError) as err:
+            delay = 60
+            if isinstance(err, urllib.error.HTTPError):
+                if err.code == 429:
+                    delay = 120
+                    with contextlib.suppress(ValueError, TypeError):
+                        delay = max(
+                            60, min(3600, int(err.headers.get("Retry-After", "120")))
+                        )
+                    state["retry_at"] = now + delay
+                err.close()
+            record = {
+                **record,
+                "error": "Could not load Lexica images. Try again shortly.",
+                "retry_at": now + delay,
+                "attempted": now,
+            }
+        state["pools"][key] = record
+        _save(path, state)
+    elif not fresh and now < state.get("retry_at", 0):
+        metadata = {"error": "Lexica is rate limited. Try again shortly."}
+    elif not fresh and not allow_network:
+        metadata = {
+            "error": "Lexica collection is updating. Try again shortly.",
+            "live_refresh_s": 2,
+        }
+    if "error" in record:
+        metadata["error"] = record["error"]
+    raw = record.get("images", [])
+    images = []
+    for entry in raw[:50] if isinstance(raw, list) else []:
+        image = _lexica_image(entry)
+        if image is None:
+            continue
+        prompt = image["prompt"]
+        if any(_prompt_match(prompt, term) for term in negatives):
+            continue
+        if positives and not (all if match == "all" else any)(
+            _prompt_match(prompt, term) for term in positives
+        ):
+            continue
+        images.append(image)
+    if images and metadata:
+        metadata["stale"] = True
+    return {"images": images, **metadata}
+
+
 def _fetch(
     options: dict[str, Any],
     settings: dict[str, Any],
@@ -630,6 +859,8 @@ def _fetch(
     *,
     allow_network: bool = True,
 ) -> dict[str, Any]:
+    if options.get("provider") == "lexica":
+        return _fetch_lexica(options, ctx, allow_network=allow_network)
     now = time.time()
     try:
         positives = _terms(options.get("positive_tags", ""), 6, "positive tags")

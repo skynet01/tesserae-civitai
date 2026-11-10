@@ -18,6 +18,12 @@ function shape(width, height) {
   return width > height ? "landscape" : width < height ? "portrait" : "square";
 }
 
+function source(image) {
+  return image?.provider === "lexica"
+    ? { name: "Lexica", imageHost: "image.lexica.art", host: "lexica.art" }
+    : { name: "Civitai", imageHost: "image.civitai.com", host: "civitai.com" };
+}
+
 // The host may report virtual client dimensions when content zoom is enabled.
 export function selectImage(images, cell, options = {}, runtime = {}) {
   const width = Number(cell?.w);
@@ -28,7 +34,7 @@ export function selectImage(images, cell, options = {}, runtime = {}) {
     ? options.orientation : shape(width, height);
   const seen = new Set();
   let pool = (Array.isArray(images) ? images : []).filter(image => {
-    if (!image || !allowedUrl(image.url, "image.civitai.com")) return false;
+    if (!image || !allowedUrl(image.url, source(image).imageHost)) return false;
     const w = Number(image.width);
     const h = Number(image.height);
     if (![w, h].every(value => Number.isFinite(value) && value > 0)) return false;
@@ -105,7 +111,8 @@ function waitForImage(image, timeout) {
 }
 
 function imageUrl(image) {
-  if (!allowedUrl(image.url, "image.civitai.com")) return "";
+  if (!allowedUrl(image.url, source(image).imageHost)) return "";
+  if (image.provider === "lexica") return image.url;
   const url = new URL(image.url);
   if (!url.pathname.includes("/original=true/")) return image.url;
   url.pathname = url.pathname.replace("/original=true/", `/width=${Math.round(Number(image.width))}/`);
@@ -137,7 +144,7 @@ export default async function render(shadow, ctx = {}) {
     const hasPool = Array.isArray(data.images) && data.images.length > 0;
     const message = hasPool
       ? "No images match this cell's orientation and resolution. Adjust the image filters."
-      : data.error || "No matching Civitai images. Try fewer filters or a longer time period.";
+      : data.error || "No matching artwork. Try fewer filters or a different search.";
     shadow.innerHTML = `${css}<div class="w is-bleed" data-widget="picture_civitai">
       <div class="bleed-empty">${escapeHtml(message)}</div></div>`;
     return;
@@ -146,16 +153,19 @@ export default async function render(shadow, ctx = {}) {
   for (let attempt = 0; image && attempt < 3; attempt++) {
     const remaining = 12000 - (Date.now() - started);
     if (remaining <= 0) break;
-    const credit = image.username ? `Civitai / ${image.username}` : "Civitai";
-    const permalink = allowedUrl(image.permalink, "civitai.com")
-      && /^\/images\/\d+\/?$/.test(new URL(image.permalink).pathname) ? image.permalink : "";
+    const provider = source(image);
+    const credit = image.username ? `${provider.name} / ${image.username}` : provider.name;
+    const permalink = allowedUrl(image.permalink, provider.host)
+      && (image.provider === "lexica"
+        ? /^\/?$/.test(new URL(image.permalink).pathname) && /^[0-9a-f-]{36}$/.test(new URL(image.permalink).searchParams.get("q") || "")
+        : /^\/images\/\d+\/?$/.test(new URL(image.permalink).pathname)) ? image.permalink : "";
     const creditText = escapeHtml(credit);
     const creditHtml = permalink
       ? `<a href="${escapeHtml(permalink)}" target="_blank" rel="noopener noreferrer">${creditText}</a>`
       : creditText;
     shadow.innerHTML = `${css}
       <div class="w is-bleed" data-widget="picture_civitai">
-        <img src="${escapeHtml(imageUrl(image))}" alt="${escapeHtml(image.username ? `Artwork by ${image.username}` : "Civitai artwork")}" style="object-fit:${options.scale === "fit" ? "contain" : "cover"};">
+        <img src="${escapeHtml(imageUrl(image))}" alt="${escapeHtml(image.username ? `Artwork by ${image.username}` : `${provider.name} artwork`)}" style="object-fit:${options.scale === "fit" ? "contain" : "cover"};">
         ${options.show_credit !== false ? `<div class="img-overlay"><span class="sub">${creditHtml}</span></div>` : ""}
       </div>`;
     const element = shadow.querySelector?.("img");
@@ -168,5 +178,5 @@ export default async function render(shadow, ctx = {}) {
     image = selectImage(pool, cell, options, runtime);
   }
   shadow.innerHTML = `${css}<div class="w is-bleed" data-widget="picture_civitai">
-    <div class="bleed-empty">The Civitai image could not be loaded. Try refreshing this widget.</div></div>`;
+    <div class="bleed-empty">The artwork could not be loaded. Try refreshing this widget.</div></div>`;
 }
