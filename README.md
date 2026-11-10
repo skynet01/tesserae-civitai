@@ -32,6 +32,21 @@ Add **Picture, AI galleries** as the only widget on a full-display page for a fu
 
 ## Filters
 
+**Civitai artwork sources** has independent checkboxes for **Tags**, **Creators**, and **My and followed collections**.
+Use any combination, or select only collections. Existing dashboards keep Tags and Creators selected. **Choose collections**
+lists image collections you own (including private ones) and follow, with a checkbox for each. Your saved key needs collection
+read access. Up to eight collections can be selected; this is separate from the existing eight tag/creator source limit.
+For a collection-only rotation, choose **Civitai** as the gallery service and uncheck Tags and Creators.
+
+Collection picks bypass include tags, just as creator picks do. Exclusions, minimum engagement, orientation and resolution
+still apply. Collections and creators take priority over tag discoveries, and duplicate images appear only once. Query previews
+identify the collection an image came from. Lineups previews and pins use the same cached eligible pool without advancing history.
+
+The picker refreshes at most once every 15 minutes per API key. Each selected collection has its own credential-isolated image
+cache, refreshed using **Collection refresh**. Changing exclusions or minimum engagement reuses the cached images. Collection
+requests share a four-second refresh budget and back off after failures; stale usable images and other selected sources remain
+available. Collection access uses Civitai's read-only site API endpoints, which may change independently of the public REST API.
+
 - **Include tags:** comma- or newline-separated names or numeric tag IDs. Tag discoveries match any included tag by default (OR); **More options > Include tag matching > All tags** requires every tag for those discoveries.
 
 - **Creators:** comma- or newline-separated Civitai usernames. Creator artwork takes priority and does not need an included tag. Tag discoveries provide additional candidates after eligible creator picks have been used recently. Exclusions and engagement minimums still apply to both sources.

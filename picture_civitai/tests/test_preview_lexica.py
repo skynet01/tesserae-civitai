@@ -388,6 +388,7 @@ def test_real_widget_preview_through_host_uses_unsaved_filters(monkeypatch, tmp_
         "/plugins/picture_civitai/query-preview",
         data={
             "opt_provider": "civitai",
+            "opt_sources": ["tags", "creators"],
             "opt_positive_tags": "painting",
             "opt_negative_tags": "photography",
             "opt_users": "",

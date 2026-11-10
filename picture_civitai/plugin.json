@@ -2,7 +2,7 @@
   "tesserae_compat": "1.x",
   "tesserae_min": "0.484.1",
   "name": "Picture, AI galleries",
-  "version": "0.1.9",
+  "version": "0.2.0",
   "kind": "widget",
   "description": "Artwork from Civitai, Lexica or both. Filter by tags, creators or prompt terms, preview up to 20 matches, then rotate images that suit the cell orientation and resolution.",
   "icon": "ph-image",
@@ -37,6 +37,28 @@
       "help": "Combine both galleries, or use either one. Each service keeps its own cache and retry limits; if one is unavailable, eligible artwork from the other remains available. Creator and engagement settings apply to Civitai only."
     },
     {
+      "name": "sources",
+      "type": "multiselect",
+      "label": "Civitai artwork sources",
+      "default": ["tags", "creators"],
+      "choices": [
+        { "value": "tags", "label": "Tags" },
+        { "value": "creators", "label": "Creators" },
+        { "value": "collections", "label": "My and followed collections" }
+      ],
+      "show_if": { "provider": ["civitai", "both"] },
+      "help": "Combine any sources, or use collections alone. Creator and collection picks do not need an included tag. Exclusions, minimum engagement, orientation and resolution still apply."
+    },
+    {
+      "name": "collections",
+      "type": "multiselect",
+      "label": "Choose collections",
+      "default": [],
+      "choices_from": "collections",
+      "show_if": { "provider": ["civitai", "both"], "sources": "collections" },
+      "help": "Choose up to 8 image collections you own or follow. Private collections are read using your saved Civitai key. The list refreshes every 15 minutes; artwork uses Collection refresh below."
+    },
+    {
       "name": "lexica_query",
       "type": "string",
       "label": "Lexica search",
@@ -60,7 +82,8 @@
       "default": "",
       "help": "Comma- or newline-separated Civitai usernames, up to 4. Prefer artwork from these creators even without an included tag; tags provide secondary discoveries. Excluded tags and minimum engagement still apply to every image. Leave blank to discover by tags.",
       "show_if": {
-        "provider": ["civitai", "both"]
+        "provider": ["civitai", "both"],
+        "sources": "creators"
       }
     },
     {

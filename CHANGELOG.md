@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- Choose tags, creators, and own or followed Civitai collections with source checkboxes and cached collection previews.
 - Ask for an exact tag name when a saved API key works but Civitai has no matching tag.
 - Combine Civitai and Lexica with shared rotation, separate caches and fallback when a service is unavailable.
 - Add Lineups artwork arrows, cached previews and pins that leave rotation history unchanged.
