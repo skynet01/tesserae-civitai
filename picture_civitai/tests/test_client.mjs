@@ -18,6 +18,27 @@ function image(id, width, height, extra = {}) {
 const landscape = { w: 1600, h: 1200 };
 const portrait = { w: 600, h: 900 };
 
+test("a pinned artwork wins over rotation and creator priority", () => {
+  const images = [image(1, 2400, 1600, { source_priority: 0 }), image(2, 2400, 1600)];
+  assert.equal(selectImage(images, landscape, { pinned_image: "2" }, { selectedId: 1 }).id, 2);
+});
+
+test("a pin cannot substitute another image or bypass physical eligibility", () => {
+  const images = [image(1, 2400, 1600), image(2, 1800, 2400), image(3, 800, 600)];
+  for (const pinned_image of ["2", "3", "999"]) {
+    assert.equal(selectImage(images, landscape, { pinned_image }, { selectedId: 1 }), null);
+  }
+});
+
+test("a failed pinned artwork cannot retry a different cached item", async () => {
+  const shadow = imageShadow([false, true]);
+  await render(shadow, { cell: { ...landscape, options: { pinned_image: "2" } }, data: {
+    images: [image(1, 2400, 1600), image(2, 2400, 1600)], selected_id: 1,
+  } });
+  assert.deepEqual(shadow.attempts, ["https://image.civitai.com/test/2.jpeg"]);
+  assert.match(shadow.innerHTML, /could not be loaded/);
+});
+
 test("Lexica artwork renders with its own credit and strict CDN", async () => {
   const artwork = image("lexica:0482ee68-0368-4eca-8846-5930db866b33", 2400, 1600, {
     provider: "lexica", username: "", url: "https://image.lexica.art/md/0482ee68-0368-4eca-8846-5930db866b33",

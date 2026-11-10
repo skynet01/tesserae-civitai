@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- Add Lineups artwork arrows, cached previews and pins that leave rotation history unchanged.
 - Add a query preview with matched tags and creators, and a choice of Civitai or Lexica.
 - Prefer creator artwork, add tag discoveries, and remember recent picks across collection refreshes.
 - Add minimum reaction and comment filters that reuse the cached collection.

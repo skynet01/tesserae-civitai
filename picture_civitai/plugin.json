@@ -2,11 +2,12 @@
   "tesserae_compat": "1.x",
   "tesserae_min": "0.484.1",
   "name": "Picture, AI galleries",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "kind": "widget",
   "description": "Artwork from Civitai or Lexica. Filter by tags, creators or prompt terms, preview up to 20 matches, then rotate images that suit the cell orientation and resolution.",
   "icon": "ph-image",
   "category": "art",
+  "lineups": { "pin_option": "pinned_image", "noun": "artworks" },
   "supports": {
     "sizes": [
       "sm",
@@ -15,6 +16,14 @@
     ]
   },
   "cell_options": [
+    {
+      "name": "pinned_image",
+      "type": "string",
+      "label": "Pinned artwork",
+      "default": "",
+      "advanced": true,
+      "help": "Choose an artwork using Show chosen in Lineups, or leave blank for normal rotation. A pin still obeys the frame orientation, resolution and filters. Pinned renders do not advance rotation history."
+    },
     {
       "name": "provider",
       "type": "select",

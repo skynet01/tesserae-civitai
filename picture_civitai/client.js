@@ -54,6 +54,9 @@ export function selectImage(images, cell, options = {}, runtime = {}) {
   }
   if (!pool.length) return null;
 
+  const pinned = String(options.pinned_image ?? "").trim();
+  if (pinned) return pool.find(image => String(image.id) === pinned) ?? null;
+
   // A durable server choice may deliberately rest a recently shown creator.
   // Honour it only after the same orientation and resolution checks as usual.
   if (runtime.selectedId != null) {

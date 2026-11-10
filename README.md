@@ -44,6 +44,26 @@ Creator sources are fetched first, followed by independent tag sources, with at 
 
 The manifest limits network access to `civitai.com`, `image.civitai.com`, `lexica.art` and `image.lexica.art`. The widget accepts only the two fixed Civitai HTTPS API paths and Lexica's search endpoint, rejects redirects between services or outside those paths, and validates image URLs against each service's image CDN. Civitai authentication is never sent to Lexica. Downloads use normal TLS verification and enforce response deadlines and size limits.
 
+## Lineups artwork browsing
+
+The Lineups page and lineup editor can browse individual artworks with left/right arrows, show thumbnail previews,
+push the selected artwork, and save it with **Show chosen**. **Pinned artwork** under More options holds the selected
+key; clear it to resume normal rotation. Pins still obey source filters, minimum engagement, orientation and resolution.
+If a pinned image leaves the eligible collection, the widget shows an explanation instead of silently changing it.
+A pinned image-load failure also never substitutes a different artwork. Browsing, query previews and pinned renders
+do not advance repeat history.
+
+The item list reads only the cached collection, never the gallery API, and contains at most 100 artworks (50 for
+Lexica). A normal widget render or query preview populates the cache first. The list uses the same physical cell
+dimensions as rendering, including Auto orientation and native-size rules. On an older host that cannot supply those
+dimensions, Auto and native-size modes return no items; explicit orientation with Allow smaller images can still list
+cached matches. Per-item previews and geometry-aware listing require the companion Lineups host update.
+
+The callback is `lineup_items(options, *, ctx=None)`, with stable string image IDs as `key`, a creator/image label,
+and `thumb` pointing to a Civitai 320 px CDN variant where available (or Lexica's small image URL). Lexica keys retain
+their `lexica:` prefix. Listing merges manifest defaults with the saved cell options, uses only the current API-key
+identity's Civitai pool, and ignores the saved pin so the editor can browse or choose a replacement.
+
 ## Orientation and image size
 
 **Auto** uses the actual cell dimensions, even when the cell and whole display have different orientations. A landscape cell accepts landscape images, a portrait cell accepts portrait images, and a square cell accepts square images. Explicit **Landscape** and **Portrait** exclude square images. **Any** accepts all shapes. A filter with no eligible images shows a clear empty state; it never silently substitutes a different orientation.

@@ -342,6 +342,15 @@ def fetch(
     options: dict[str, Any], settings: dict[str, Any], *, ctx: dict[str, Any]
 ) -> dict[str, Any]:
     """Apply placement minimums and durable rotation to the shared image pool."""
+    pinned = options.get("pinned_image", "")
+    if not isinstance(pinned, str) or (
+        pinned.strip() and not _history_id(pinned.strip())
+    ):
+        return {
+            "images": [],
+            "error": "Choose a valid pinned artwork from Lineups, or clear the pin.",
+        }
+    pinned = pinned.strip()
     provider = options.get("provider", "civitai")
     if provider not in ("civitai", "lexica"):
         return {
@@ -395,14 +404,111 @@ def fetch(
                 else {}
             ),
         }
+    if pinned:
+        selected = next(
+            (
+                image
+                for image in _eligible_for_context(result["images"], options, ctx)
+                if str(image["id"]) == pinned
+            ),
+            None,
+        )
+        if selected is None:
+            return {
+                **result,
+                "images": [],
+                "error": "The pinned artwork is unavailable or does not match this frame and its filters. Choose another artwork or clear the pin.",
+            }
+        return {**result, "images": [selected], "selected_id": selected["id"]}
+    if ctx.get("_lineup_cache_only"):
+        return result
     return _select_rotation(result, options, ctx, repeat_days)
+
+
+def _eligible_for_context(
+    images: Any, options: dict[str, Any], ctx: dict[str, Any]
+) -> list[dict[str, Any]]:
+    width, height = ctx.get("cell_w"), ctx.get("cell_h")
+    if not _integer(width) or not _integer(height):
+        if (
+            options.get("orientation") not in ("landscape", "portrait", "any")
+            or options.get("resolution") != "allow_smaller"
+        ):
+            return []
+        # Explicit orientation with unrestricted size does not depend on geometry.
+        width = height = 1
+    return _rotation_candidates(images, options, width, height)
+
+
+def _thumbnail(image: dict[str, Any], width: int = 480) -> str:
+    if image.get("provider") == "lexica":
+        return image.get("thumbnail", image["url"])
+    return re.sub(
+        r"/(?:original=true|width=\d+[^/]*)/",
+        f"/width={min(width, image['width'])}/",
+        image["url"],
+        count=1,
+    )
+
+
+def lineup_items(
+    options: dict[str, Any] | None = None, *, ctx: dict[str, Any] | None = None
+) -> list[dict[str, str]]:
+    """List this frame's eligible cached artworks without fetching or rotating."""
+    from flask import current_app, has_app_context
+
+    if not has_app_context():
+        return []
+    registry = current_app.config.get("PLUGIN_REGISTRY")
+    plugin = registry.get("picture_civitai") if registry is not None else None
+    if plugin is None:
+        return []
+    effective = {
+        field["name"]: field.get("default")
+        for field in plugin.manifest.get("cell_options", [])
+    }
+    effective.update(options or {})
+    effective["pinned_image"] = ""
+    context = {
+        "data_dir": str(plugin.data_dir),
+        **(ctx or {}),
+        "preview": True,
+        "settled": False,
+        "_lineup_cache_only": True,
+    }
+    store = current_app.config.get("SETTINGS_STORE")
+    settings = (
+        store.get_for_runtime(
+            "plugins", "picture_civitai", plugin.manifest.get("settings", [])
+        )
+        if store is not None
+        else {}
+    )
+    result = fetch(effective, settings, ctx=context)
+    images = _eligible_for_context(result.get("images"), effective, context)
+    return [
+        {
+            "key": str(image["id"]),
+            "label": f"{image['username']} / {image['id']}"
+            if image.get("username")
+            else f"Lexica / {image.get('prompt', '')[:120]}"
+            if image.get("provider") == "lexica"
+            else f"Artwork {image['id']}",
+            "thumb": _thumbnail(image, 320),
+        }
+        for image in images[:MAX_IMAGES]
+    ]
 
 
 def query_preview(
     options: dict[str, Any], settings: dict[str, Any], *, ctx: dict[str, Any]
 ) -> dict[str, Any]:
     """Show the same eligible pool as a display, without advancing history."""
-    result = fetch(options, settings, ctx={**ctx, "preview": True, "settled": False})
+    result = fetch(
+        {**options, "pinned_image": ""},
+        settings,
+        ctx={**ctx, "preview": True, "settled": False},
+    )
     if not result.get("images"):
         return {**result, "total": 0}
     width, height = ctx.get("cell_w"), ctx.get("cell_h")
@@ -437,14 +543,7 @@ def query_preview(
             matches.extend(
                 f"Tag: {term}" for term in positives if term in names or term in ids
             )
-        thumbnail = image.get("thumbnail", image["url"])
-        if image.get("provider") != "lexica":
-            thumbnail = re.sub(
-                r"/(?:original=true|width=\d+[^/]*)/",
-                "/width=480/",
-                image["url"],
-                count=1,
-            )
+        thumbnail = _thumbnail(image)
         images.append(
             {**image, "thumbnail": thumbnail, "matches": matches or ["Public feed"]}
         )
@@ -672,6 +771,8 @@ def _fetch_pool(
     metadata = {"placement_id": placement}
     if _integer(ctx.get("cell_w")) and _integer(ctx.get("cell_h")):
         metadata.update(target_w=ctx["cell_w"], target_h=ctx["cell_h"])
+    if ctx.get("_lineup_cache_only"):
+        return {**_fetch(options, settings, ctx, allow_network=False), **metadata}
     if not _LOCK.acquire(blocking=False):
         return {
             **_fetch(options, settings, ctx, allow_network=False),
