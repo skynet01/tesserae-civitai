@@ -16,6 +16,11 @@ def server():
     return module
 
 
+@pytest.fixture
+def lexica_enabled(server, monkeypatch):
+    monkeypatch.setattr(server, "LEXICA_ENABLED", True)
+
+
 def civitai(ident, **extra):
     return dict(
         id=ident,
@@ -76,7 +81,7 @@ def lexica(ident="0482ee68-0368-4eca-8846-5930db866b33", **extra):
 
 
 def test_lexica_search_filters_prompt_and_reuses_cache_without_civitai_key(
-    server, monkeypatch, tmp_path
+    server, monkeypatch, tmp_path, lexica_enabled
 ):
     calls = []
 
@@ -139,7 +144,7 @@ def test_lexica_search_filters_prompt_and_reuses_cache_without_civitai_key(
     ],
 )
 def test_lexica_rejects_unsafe_or_unclassified_results(
-    server, monkeypatch, tmp_path, extra
+    server, monkeypatch, tmp_path, extra, lexica_enabled
 ):
     monkeypatch.setattr(
         server, "fetch_json", lambda *a, **k: {"images": [{**lexica(), **extra}]}
@@ -154,7 +159,7 @@ def test_lexica_rejects_unsafe_or_unclassified_results(
     )
 
 
-def test_lexica_history_survives_reload(server, monkeypatch, tmp_path):
+def test_lexica_history_survives_reload(server, monkeypatch, tmp_path, lexica_enabled):
     monkeypatch.setattr(server, "fetch_json", lambda *a, **k: {"images": [lexica()]})
     ctx = {
         "data_dir": str(tmp_path),
@@ -179,8 +184,46 @@ def test_unsupported_provider_does_not_fetch(server, monkeypatch, tmp_path):
     assert "service" in result["error"].lower()
 
 
+@pytest.mark.parametrize("provider", ["lexica", "both"])
+def test_saved_lexica_selection_previews_civitai_only(
+    server, monkeypatch, tmp_path, provider
+):
+    def network(url, **kwargs):
+        assert url.startswith(server.API_URL)
+        return {"items": [civitai(1, type="image", nsfwLevel="None", browsingLevel=1)]}
+
+    monkeypatch.setattr(server, "fetch_json", network)
+    result = server.query_preview(
+        {
+            "provider": provider,
+            "lexica_query": "city",
+            "users": "alice",
+            "positive_tags": "painting",
+        },
+        {},
+        ctx={"data_dir": str(tmp_path), "cell_w": 1600, "cell_h": 900},
+    )
+    assert [image["id"] for image in result["images"]] == [1]
+    assert result["images"][0]["matches"] == ["Creator: alice", "Tag: painting"]
+
+
+def test_paused_lexica_pin_has_an_actionable_error(server, monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        server,
+        "fetch_json",
+        lambda *a, **k: pytest.fail("Pinned Lexica artwork fetched the network"),
+    )
+    result = server.fetch(
+        {"provider": "both", "pinned_image": f"lexica:{lexica()['id']}"},
+        {},
+        ctx={"data_dir": str(tmp_path)},
+    )
+    assert result["images"] == []
+    assert "Clear the pin" in result["error"]
+
+
 def test_combined_galleries_merge_and_reuse_independent_caches(
-    server, monkeypatch, tmp_path
+    server, monkeypatch, tmp_path, lexica_enabled
 ):
     calls = []
 
@@ -239,7 +282,7 @@ def test_combined_galleries_merge_and_reuse_independent_caches(
 
 @pytest.mark.parametrize("failed", ["civitai", "lexica", "both"])
 def test_combined_galleries_keep_working_when_either_service_fails(
-    server, monkeypatch, tmp_path, failed
+    server, monkeypatch, tmp_path, failed, lexica_enabled
 ):
     def network(url, **kwargs):
         service = "lexica" if url.startswith(server.LEXICA_URL) else "civitai"
@@ -272,7 +315,7 @@ def test_combined_galleries_keep_working_when_either_service_fails(
 
 
 def test_combined_collection_cap_keeps_both_services_and_native_rules(
-    server, monkeypatch, tmp_path
+    server, monkeypatch, tmp_path, lexica_enabled
 ):
     def network(url, **kwargs):
         if url.startswith(server.LEXICA_URL):
@@ -305,7 +348,7 @@ def test_combined_collection_cap_keeps_both_services_and_native_rules(
 
 
 def test_lexica_failure_keeps_cached_matches_and_backs_off(
-    server, monkeypatch, tmp_path
+    server, monkeypatch, tmp_path, lexica_enabled
 ):
     from urllib.error import HTTPError
 

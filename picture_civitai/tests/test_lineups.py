@@ -187,6 +187,7 @@ def test_lexica_lists_small_previews_and_pins_stable_provider_keys(
     gallery, monkeypatch
 ):
     server, options, settings, ctx, _, _ = gallery
+    monkeypatch.setattr(server, "LEXICA_ENABLED", True)
     ident = "0482ee68-0368-4eca-8846-5930db866b33"
     small = f"https://image.lexica.art/sm/{ident}"
     monkeypatch.setattr(
@@ -245,6 +246,7 @@ def test_combined_galleries_list_and_pin_from_cache_without_changing_history(
     gallery, monkeypatch
 ):
     server, options, settings, ctx, _, _ = gallery
+    monkeypatch.setattr(server, "LEXICA_ENABLED", True)
     ident = "0482ee68-0368-4eca-8846-5930db866b33"
     monkeypatch.setattr(
         server,

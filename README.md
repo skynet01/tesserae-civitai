@@ -1,28 +1,14 @@
 # AI gallery picture widget for Tesserae
 
-Rotating artwork from [Civitai](https://civitai.com), [Lexica](https://lexica.art), or both for [Tesserae](https://github.com/dmellok/tesserae). Images fill the widget area, with an optional quiet creator credit. Configuration uses Tesserae's normal widget settings and cell options. The widget ID remains `picture_civitai`, and existing dashboards keep using Civitai.
+Rotating artwork from [Civitai](https://civitai.com) for [Tesserae](https://github.com/dmellok/tesserae). Images fill the widget area, with an optional quiet creator credit. Configuration uses Tesserae's normal widget settings and cell options. The widget ID remains `picture_civitai`, and existing dashboards keep using Civitai.
 
-## Query preview and gallery choice
+## Query preview
 
-Choose **Gallery service** in the widget options. **Preview query** opens a popup with up to 20 images from the eligible cached collection, using the current unsaved filters and target cell dimensions. Badges over each image show the matching creator and included tags, or the Lexica search and matching prompt terms. Click an image to open its original page. Preview does not advance rotation or change repeat history. Counts describe the bounded cached collection, rather than every result available from the service.
+**Preview query** opens a popup with up to 20 images from the eligible cached collection, using the current unsaved filters and target cell dimensions. Badges over each image show the matching creators, tags, and collections. Click an image to open its original page. Preview does not advance rotation or change repeat history. Counts describe the bounded cached collection, rather than every result available from the service.
 
-The preview button requires Tesserae's query-preview editor hook (included in the companion core change). Older hosts can still render the widget and choose a gallery, but do not show the button.
+The preview button requires Tesserae's query-preview editor hook (included in the companion core change). Older hosts can still render the widget, but do not show the button.
 
-**Civitai + Lexica** combines up to 100 candidates, interleaving the two collections so both services are represented.
-Creator artwork still takes priority during rotation. Each service reuses its existing cache, refresh interval and retry
-backoff. If one service fails, the other service's eligible results remain usable with a warning. Cached results from
-an unavailable service can also remain usable. Civitai creator, popularity and minimum-engagement settings apply only
-to Civitai; include/exclude terms, orientation and resolution apply to both. No key is sent to Lexica.
-
-**Lexica search** accepts a description of up to 300 characters. Lexica's public API returns up to 50 candidates per search. Included terms must occur in each image's generation prompt (Any or All); excluded terms reject matching prompts. These are literal text checks, not Civitai tags or visual content recognition. Clear included terms to accept all safe search results. Creator, popularity, time-period and engagement filters apply only to Civitai and are hidden for Lexica. Orientation, resolution, rotation and repeat avoidance work with both services. Lexica candidates must explicitly have `nsfw: false` and `grid: false`.
-
-Lexica uses no Civitai API key. Its cache is separate, and requests are limited to the documented search endpoint and image CDN. On 2026-11-10, live verification returned HTTP 500 for three searches; mocked-response integration tests cover success and failure, but live Lexica image retrieval could not be verified.
-
-![Painted artwork on a portrait Tesserae cell](screenshots/lg.png)
-
-Preview artwork: [jankytrees on Civitai](https://civitai.com/images/147746839).
-
-Requires Tesserae 0.484.1 or newer. Folder shipped: `picture_civitai`.
+Lexica is temporarily disabled. Saved Lexica or mixed-gallery settings use Civitai. Clear a Lexica artwork pin to resume rotation.
 
 ## Install
 
@@ -67,7 +53,7 @@ Only public images marked SFW by Civitai are requested. Filtering depends on Civ
 
 Creator sources are fetched first, followed by independent tag sources, with at most eight sources total. When both have matches, the cache reserves up to 75 creator images and 25 tag discoveries, filling unused space from either side. A creator match wins if both sources contain the same image. If a tag name cannot be resolved, valid creator picks remain available with a warning.
 
-The manifest limits network access to `civitai.com`, `image.civitai.com`, `lexica.art` and `image.lexica.art`. The widget accepts only the two fixed Civitai HTTPS API paths and Lexica's search endpoint, rejects redirects between services or outside those paths, and validates image URLs against each service's image CDN. Civitai authentication is never sent to Lexica. Downloads use normal TLS verification and enforce response deadlines and size limits.
+The manifest limits network access to `civitai.com` and `image.civitai.com`. The widget accepts only its fixed Civitai HTTPS API paths, rejects redirects outside them, and validates Civitai image URLs against its CDN. Downloads use normal TLS verification and enforce response deadlines and size limits.
 
 ## Lineups artwork browsing
 
@@ -78,15 +64,13 @@ If a pinned image leaves the eligible collection, the widget shows an explanatio
 A pinned image-load failure also never substitutes a different artwork. Browsing, query previews and pinned renders
 do not advance repeat history.
 
-The item list reads only the cached collection, never the gallery API, and contains at most 100 artworks (50 for
-Lexica). A normal widget render or query preview populates the cache first. The list uses the same physical cell
+The item list reads only the cached collection, never the gallery API, and contains at most 100 artworks. A normal widget render or query preview populates the cache first. The list uses the same physical cell
 dimensions as rendering, including Auto orientation and native-size rules. On an older host that cannot supply those
 dimensions, Auto and native-size modes return no items; explicit orientation with Allow smaller images can still list
 cached matches. Per-item previews and geometry-aware listing require the companion Lineups host update.
 
 The callback is `lineup_items(options, *, ctx=None)`, with stable string image IDs as `key`, a creator/image label,
-and `thumb` pointing to a Civitai 320 px CDN variant where available (or Lexica's small image URL). Lexica keys retain
-their `lexica:` prefix. Listing merges manifest defaults with the saved cell options, uses only the current API-key
+and `thumb` pointing to a Civitai 320 px CDN variant where available. Listing merges manifest defaults with the saved cell options, uses only the current API-key
 identity's Civitai pool, and ignores the saved pin so the editor can browse or choose a replacement.
 
 ## Orientation and image size

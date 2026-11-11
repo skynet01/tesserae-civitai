@@ -4,7 +4,7 @@
   "name": "Picture, AI galleries",
   "version": "0.2.2",
   "kind": "widget",
-  "description": "Artwork from Civitai, Lexica or both. Filter by tags, creators or prompt terms, preview up to 20 matches, then rotate images that suit the cell orientation and resolution.",
+  "description": "Artwork from Civitai. Filter by tags, creators or collections, preview up to 20 matches, then rotate images that suit the cell orientation and resolution.",
   "icon": "ph-image",
   "category": "art",
   "lineups": { "pin_option": "pinned_image" },
@@ -25,18 +25,6 @@
       "help": "Choose an artwork using Show chosen in Lineups, or leave blank for normal rotation. A pin still obeys the frame orientation, resolution and filters. Pinned renders do not advance rotation history."
     },
     {
-      "name": "provider",
-      "type": "select",
-      "label": "Gallery service",
-      "default": "civitai",
-      "choices": [
-        { "value": "civitai", "label": "Civitai" },
-        { "value": "lexica", "label": "Lexica" },
-        { "value": "both", "label": "Civitai + Lexica" }
-      ],
-      "help": "Combine both galleries, or use either one. Each service keeps its own cache and retry limits; if one is unavailable, eligible artwork from the other remains available. Creator and engagement settings apply to Civitai only."
-    },
-    {
       "name": "sources",
       "type": "multiselect",
       "label": "Civitai artwork sources",
@@ -46,7 +34,6 @@
         { "value": "creators", "label": "Creators" },
         { "value": "collections", "label": "My and followed collections" }
       ],
-      "show_if": { "provider": ["civitai", "both"] },
       "help": "Combine any sources, or use collections alone. Creator and collection picks do not need an included tag. Exclusions, minimum engagement, orientation and resolution still apply."
     },
     {
@@ -55,25 +42,15 @@
       "label": "Choose collections",
       "default": [],
       "choices_from": "collections",
-      "show_if": { "provider": ["civitai", "both"], "sources": "collections" },
+      "show_if": { "sources": "collections" },
       "help": "Choose up to 8 image collections you own or follow. Private collections are read using your saved Civitai key. The list refreshes every 15 minutes; artwork uses Collection refresh below."
-    },
-    {
-      "name": "lexica_query",
-      "type": "string",
-      "label": "Lexica search",
-      "default": "illustration painting",
-      "show_if": {
-        "provider": ["lexica", "both"]
-      },
-      "help": "Search description, up to 300 characters. Include and exclude terms below are then checked against each returned prompt. Only results explicitly marked safe and not a multi-image grid are used."
     },
     {
       "name": "positive_tags",
       "type": "textarea",
-      "label": "Include tags / prompt terms",
+      "label": "Include tags",
       "default": "illustration, painting",
-      "help": "Comma- or newline-separated tag names or numeric IDs, up to 6. Starts with illustration or painting. Tags use OR by default. Creator picks take priority; these tags add secondary discoveries. A Civitai API key enables full name lookup. Without one, other names must occur in the sampled public feed. Blank tags and creators use the popular public feed. On Lexica, these are literal words or phrases required in the generation prompt, rather than image tags; Any / All matching applies. Leave blank to use all search results."
+      "help": "Comma- or newline-separated tag names or numeric IDs, up to 6. Starts with illustration or painting. Tags use OR by default. Creator picks take priority; these tags add secondary discoveries. A Civitai API key enables full name lookup. Without one, other names must occur in the sampled public feed. Blank tags and creators use the popular public feed."
     },
     {
       "name": "users",
@@ -82,16 +59,15 @@
       "default": "",
       "help": "Comma- or newline-separated Civitai usernames, up to 4. Prefer artwork from these creators even without an included tag; tags provide secondary discoveries. Excluded tags and minimum engagement still apply to every image. Leave blank to discover by tags.",
       "show_if": {
-        "provider": ["civitai", "both"],
         "sources": "creators"
       }
     },
     {
       "name": "negative_tags",
       "type": "textarea",
-      "label": "Exclude tags / prompt terms",
+      "label": "Exclude tags",
       "default": "photography, photorealistic",
-      "help": "Comma- or newline-separated tag names or numeric IDs, up to 50. Starts by excluding photographic styles. An image with any excluded tag is rejected, even if it also has an included tag. No API key is needed for tag-name exclusions. On Lexica, these exclude literal words or phrases in the generation prompt."
+      "help": "Comma- or newline-separated tag names or numeric IDs, up to 50. Starts by excluding photographic styles. An image with any excluded tag is rejected, even if it also has an included tag. No API key is needed for tag-name exclusions."
     },
     {
       "name": "orientation",
@@ -176,10 +152,7 @@
       "type": "boolean",
       "label": "Prioritize fresh art",
       "default": false,
-      "help": "Fetch Civitai's newest results and prefer newer eligible art within each source priority. This overrides the Prioritize menu while enabled and uses the existing refresh schedule.",
-      "show_if": {
-        "provider": ["civitai", "both"]
-      }
+      "help": "Fetch Civitai's newest results and prefer newer eligible art within each source priority. This overrides the Prioritize menu while enabled and uses the existing refresh schedule."
     },
     {
       "name": "sort",
@@ -192,10 +165,7 @@
         { "value": "Most Comments", "label": "Most comments" },
         { "value": "Newest", "label": "Newest" }
       ],
-      "help": "How Civitai ranks candidate artwork within the source time period (Month by default). Rotation cycles through the cached matches. Each priority has its own shared cache.",
-      "show_if": {
-        "provider": ["civitai", "both"]
-      }
+      "help": "How Civitai ranks candidate artwork within the source time period (Month by default). Rotation cycles through the cached matches. Each priority has its own shared cache."
     },
     {
       "name": "min_reactions",
@@ -205,10 +175,7 @@
       "min": 0,
       "max": 1000000000,
       "advanced": true,
-      "help": "Minimum combined likes, hearts, laughs and cries reported by Civitai. Use a whole number; 0 disables this filter. Missing counts cannot satisfy a positive minimum. Filters the cached collection without extra API requests.",
-      "show_if": {
-        "provider": ["civitai", "both"]
-      }
+      "help": "Minimum combined likes, hearts, laughs and cries reported by Civitai. Use a whole number; 0 disables this filter. Missing counts cannot satisfy a positive minimum. Filters the cached collection without extra API requests."
     },
     {
       "name": "min_comments",
@@ -218,10 +185,7 @@
       "min": 0,
       "max": 1000000000,
       "advanced": true,
-      "help": "Minimum comment count reported by Civitai. Use a whole number; 0 disables this filter. Missing counts cannot satisfy a positive minimum. Counts update with the daily collection refresh.",
-      "show_if": {
-        "provider": ["civitai", "both"]
-      }
+      "help": "Minimum comment count reported by Civitai. Use a whole number; 0 disables this filter. Missing counts cannot satisfy a positive minimum. Counts update with the daily collection refresh."
     },
     {
       "name": "period",
@@ -234,10 +198,7 @@
         { "value": "Week", "label": "Week" },
         { "value": "Month", "label": "Month" },
         { "value": "AllTime", "label": "All time" }
-      ],
-      "show_if": {
-        "provider": ["civitai", "both"]
-      }
+      ]
     },
     {
       "name": "show_credit",
@@ -269,9 +230,7 @@
   },
   "requires": [
     "network:civitai.com",
-    "network:image.civitai.com",
-    "network:lexica.art",
-    "network:image.lexica.art"
+    "network:image.civitai.com"
   ],
   "data_schema": {
     "fields": [

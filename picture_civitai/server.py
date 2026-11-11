@@ -29,6 +29,7 @@ API_URL = "https://civitai.com/api/v1/images"
 TAG_URL = "https://civitai.com/api/trpc/tag.getAll"
 COLLECTIONS_URL = "https://civitai.com/api/trpc/collection.getAllUser"
 COLLECTION_IMAGES_URL = "https://civitai.com/api/trpc/image.getInfinite"
+LEXICA_ENABLED = False
 LEXICA_URL = "https://lexica.art/api/v1/search"
 LEXICA_ID = r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}"
 MAX_IMAGES = 100
@@ -435,10 +436,19 @@ def _fetch_for_placement(
         }
     pinned = pinned.strip()
     provider = options.get("provider", "civitai")
+    if not LEXICA_ENABLED:
+        if pinned.startswith("lexica:"):
+            return {
+                "images": [],
+                "error": "Lexica artwork is paused. Clear the pin to use Civitai.",
+            }
+        if provider in ("lexica", "both"):
+            provider = "civitai"
+            options = {**options, "provider": provider}
     if provider not in ("civitai", "lexica", "both"):
         return {
             "images": [],
-            "error": "Choose Civitai, Lexica, or both as the gallery service.",
+            "error": "Choose a supported gallery service.",
         }
     try:
         reactions = (
@@ -732,7 +742,7 @@ def query_preview(
     with contextlib.suppress(FeedError):
         positives = _terms(options.get("positive_tags", ""), 6, "positive tags")
     with contextlib.suppress(FeedError):
-        if "creators" in sources and options.get("provider", "civitai") != "lexica":
+        if "creators" in sources:
             users = _terms(options.get("users", ""), 4, "creators")
     collection_labels = {}
     if any(image.get("collection_ids") for image in pool):
