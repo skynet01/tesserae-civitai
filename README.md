@@ -2,13 +2,23 @@
 
 Rotating artwork from [Civitai](https://civitai.com) for [Tesserae](https://github.com/dmellok/tesserae). Images fill the widget area, with an optional quiet creator credit. Configuration uses Tesserae's normal widget settings and cell options. The widget ID remains `picture_civitai`, and existing dashboards keep using Civitai.
 
+## API key is optional
+
+**No API key is required to display Civitai artwork.** Without a key, the widget supports the public SFW feed, creator filters, numeric tag IDs, tag-name exclusions, and the default illustration/painting preset. Rotation, engagement minimums, orientation and resolution filters also work without a key.
+
+An optional key adds full positive tag-name lookup and access to **My and followed collections**, including private collections your account can read. Without a key, other positive tag names must occur in a sample of the public feed. Use the exact Civitai image tag name, including spaces and plural forms, or its numeric ID.
+
+Create a free personal key in Civitai account settings and save it under **Settings > Plugins > Picture, AI galleries > Civitai API key**. Collections need collection read access. Tesserae stores the key as a secret and keeps it out of the widget client. SFW filtering and the widget's request caps apply with or without a key. [Civitai account settings](https://civitai.com/user/account)
+
 ## Query preview
 
-**Preview query** opens a popup with up to 20 images from the eligible cached collection, using the current unsaved filters and target cell dimensions. Badges over each image show the matching creators, tags, and collections. Click an image to open its original page. Preview does not advance rotation or change repeat history. Counts describe the bounded cached collection, rather than every result available from the service.
+**Preview query** opens a popup with up to 20 images from the eligible cached collection, using the current unsaved filters and target cell dimensions. **Show tags** at the top hides or shows the match overlays without another query. The overlays identify matching creators, tags, and collections. Click an image to open its original page. Preview leaves rotation and repeat history untouched. Counts describe the bounded cached collection.
 
 The preview button requires Tesserae's query-preview editor hook (included in the companion core change). Older hosts can still render the widget, but do not show the button.
 
-Lexica is temporarily disabled. Saved Lexica or mixed-gallery settings use Civitai. Clear a Lexica artwork pin to resume rotation.
+## Civitai and Lexica
+
+Civitai is the active gallery service. **Civitai + Lexica** was a combined mode with shared rotation and separate caches. Lexica is currently paused because its search API is unavailable, and the gallery-service picker is hidden. Saved Lexica or mixed-gallery settings use Civitai. Clear a pinned Lexica artwork to resume rotation.
 
 ## Install
 
@@ -20,9 +30,9 @@ Add **Picture, AI galleries** as the only widget on a full-display page for a fu
 
 **Civitai artwork sources** has independent checkboxes for **Tags**, **Creators**, and **My and followed collections**.
 Use any combination, or select only collections. Existing dashboards keep Tags and Creators selected. **Choose collections**
-lists image collections you own (including private ones) and follow, with a checkbox for each. Your saved key needs collection
-read access. Up to eight collections can be selected; this is separate from the existing eight tag/creator source limit.
-For a collection-only rotation, choose **Civitai** as the gallery service and uncheck Tags and Creators.
+lists image collections you own (including private ones) and follow, with a checkbox for each. It needs a saved key with collection
+read access. Up to eight collections can be selected, alongside up to eight tag/creator sources.
+For a collection-only rotation, check **My and followed collections**, choose the collections, and uncheck **Tags** and **Creators**.
 
 Collection picks bypass include tags, just as creator picks do. Exclusions, minimum engagement, orientation and resolution
 still apply. Collections and creators take priority over tag discoveries, and duplicate images appear only once. Query previews
@@ -33,25 +43,18 @@ cache, refreshed using **Collection refresh**. Changing exclusions or minimum en
 requests share a four-second refresh budget and back off after failures; stale usable images and other selected sources remain
 available. Collection access uses Civitai's read-only site API endpoints, which may change independently of the public REST API.
 
-- **Include tags:** comma- or newline-separated names or numeric tag IDs. Tag discoveries match any included tag by default (OR); **More options > Include tag matching > All tags** requires every tag for those discoveries.
+- **Include tags:** comma- or newline-separated names or numeric tag IDs. Tag discoveries match any included tag by default (OR); **More options > Include matching > All tags** requires every tag for those discoveries.
 
 - **Creators:** comma- or newline-separated Civitai usernames. Creator artwork takes priority and does not need an included tag. Tag discoveries provide additional candidates after eligible creator picks have been used recently. Exclusions and engagement minimums still apply to both sources.
 - **Exclude tags:** every exclusion applies. An image with any excluded tag is rejected, including when that tag is also included. Names and numeric IDs are supported.
-
-Civitai names must match an image tag exactly, including words and plural forms; for example, `outdoors` is different
-from `outdoor`. Spaces within a name are supported. An API key enables lookup but does not turn arbitrary phrases into tags.
-
-Creator filters, negative tag names and the default illustration/painting preset work without an API key. The preset's verified image tag IDs are built in, so it needs no tag lookup requests. Without a key, other positive tag names are resolved from a sample of the popular public feed; names absent from that sample produce a message asking for an API key or numeric tag ID. This sample is not Civitai's complete tag index.
 
 **More options > Minimum reactions / Minimum comments** can require a minimum amount of engagement. For example, set Minimum reactions to `100` to keep images with at least 100 combined likes, hearts, laughs and cries. Dislikes are excluded. Both minimums default to `0` (disabled); enabled minimums must both be met. Images with missing or invalid required counts are skipped. These are the counts returned by Civitai, rather than a star rating or a guarantee of image quality. The image API supports Most collected ordering but does not return a collection count for a collection minimum.
 
 Minimums filter the existing cached collection locally. Raising, lowering or disabling a minimum makes no additional API requests. Counts update when the collection refreshes; a narrow threshold can exhaust the sampled pool, in which case the widget asks you to lower it or wait for the next refresh. Upgrading from a release that did not cache counts fetches the collection once to populate them.
 
-For full positive tag-name lookup, create a free personal API key at [Civitai account settings](https://civitai.com/user/account) and save it in **Settings > Plugins > Picture, AI galleries > Civitai API key**. Tesserae stores it as a secret and does not send it to the widget client. The widget uses Civitai's public image API and an internal tRPC image-tag lookup endpoint. The internal endpoint requires authentication and may change independently of the public API.
+Only images marked SFW by Civitai are eligible, including artwork from authorized private collections. Filtering depends on Civitai's metadata. Candidate collection is bounded, so narrow combinations can have no matches even when matching images exist elsewhere on Civitai.
 
-Only public images marked SFW by Civitai are requested. Filtering depends on Civitai's metadata; it does not inspect image contents. Candidate collection is bounded, so narrow combinations can have no matches even when matching images exist elsewhere on Civitai.
-
-Creator sources are fetched first, followed by independent tag sources, with at most eight sources total. When both have matches, the cache reserves up to 75 creator images and 25 tag discoveries, filling unused space from either side. A creator match wins if both sources contain the same image. If a tag name cannot be resolved, valid creator picks remain available with a warning.
+Creator sources are fetched first, followed by independent tag sources, with at most eight tag/creator sources total. When both have matches, the cache reserves up to 75 creator images and 25 tag discoveries, filling unused space from either side. A creator match wins if both sources contain the same image. If a tag name cannot be resolved, valid creator picks remain available with a warning.
 
 The manifest limits network access to `civitai.com` and `image.civitai.com`. The widget accepts only its fixed Civitai HTTPS API paths, rejects redirects outside them, and validates Civitai image URLs against its CDN. Downloads use normal TLS verification and enforce response deadlines and size limits.
 
@@ -68,10 +71,6 @@ The item list reads only the cached collection, never the gallery API, and conta
 dimensions as rendering, including Auto orientation and native-size rules. On an older host that cannot supply those
 dimensions, Auto and native-size modes return no items; explicit orientation with Allow smaller images can still list
 cached matches. Per-item previews and geometry-aware listing require the companion Lineups host update.
-
-The callback is `lineup_items(options, *, ctx=None)`, with stable string image IDs as `key`, a creator/image label,
-and `thumb` pointing to a Civitai 320 px CDN variant where available. Listing merges manifest defaults with the saved cell options, uses only the current API-key
-identity's Civitai pool, and ignores the saved pin so the editor can browse or choose a replacement.
 
 ## Orientation and image size
 
