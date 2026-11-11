@@ -54,6 +54,85 @@ def test_drawing_style_uses_verified_image_tag_without_discovery(
     assert parse_qs(urlsplit(calls[0]).query)["tags"] == ["81"]
 
 
+def test_gzip_transport_checks_both_wire_and_decoded_limits(server, monkeypatch):
+    import gzip
+    import io
+    from types import SimpleNamespace
+
+    payload = b'{"items":["' + b"x" * 512 + b'"]}'
+
+    class Response(io.BytesIO):
+        headers = {"Content-Encoding": "gzip"}
+        fp = SimpleNamespace(raw=SimpleNamespace(_sock=SimpleNamespace(settimeout=lambda _: None)))
+
+    def open_response(request, *, timeout):
+        assert request.get_header("Accept-encoding") == "gzip"
+        return Response(gzip.compress(payload))
+
+    monkeypatch.setattr(server, "_api_opener", lambda: SimpleNamespace(open=open_response))
+    assert server.fetch_json(server.API_URL)["items"] == ["x" * 512]
+    with pytest.raises(ValueError, match="exceeds byte cap"):
+        server.fetch_json(server.API_URL, max_bytes=128)
+    with pytest.raises(ValueError, match="exceeds byte cap"):
+        server.fetch_json(server.API_URL, max_bytes=10)
+
+
+def test_warm_render_skips_worker_and_sends_only_display_fields(server, monkeypatch, tmp_path):
+    calls = fake_network(monkeypatch, server, lambda *_: {"items": [image()]})
+    ctx = {"data_dir": str(tmp_path), "cell_w": 1600, "cell_h": 1200}
+    options = {"positive_tags": "10"}
+    first = server.fetch(options, {}, ctx=ctx)
+    assert set(first["images"][0]) == {
+        "id", "url", "width", "height", "username", "permalink", "source_priority",
+    }
+
+    def unexpected_worker(*args, **kwargs):
+        pytest.fail("A warm render should not start a refresh worker")
+
+    monkeypatch.setattr(server.threading, "Thread", unexpected_worker)
+    assert server.fetch(options, {}, ctx=ctx) == first
+    preview = server.query_preview(options, {}, ctx=ctx)
+    assert "Tag: 10" in preview["images"][0]["matches"]
+    assert "tags" not in preview["images"][0]
+    assert len(calls) == 1
+
+
+def test_cache_snapshots_reuse_decoding_and_see_atomic_replacement(server, monkeypatch, tmp_path):
+    path = tmp_path / "civitai-cache.json"
+    state = {"pools": {"pool": {"images": [image()]}}, "tags": {}}
+    server._save(path, state)
+    loads = server.json.loads
+    decodes = []
+
+    def count_decodes(*args, **kwargs):
+        decodes.append(True)
+        return loads(*args, **kwargs)
+
+    monkeypatch.setattr(server.json, "loads", count_decodes)
+    first = server._load(path)
+    first["pools"].clear()
+    assert "pool" in server._load(path)["pools"]
+    assert len(decodes) == 1
+    server._save(path, {"pools": {}, "tags": {}})
+    assert server._load(path)["pools"] == {}
+    assert len(decodes) == 2
+
+
+def test_fresh_art_requests_newest_and_keeps_batch_fields_in_the_cache(server, monkeypatch, tmp_path):
+    def response(url, query):
+        assert query["sort"] == ["Newest"]
+        assert query["period"] == ["Week"]
+        return {"items": [image(createdAt="2026-11-07T00:00:00Z", postId=10)]}
+
+    calls = fake_network(monkeypatch, server, response)
+    options = {"sort": "Most Reactions", "prioritize_fresh": True}
+    for _ in range(2):
+        result = server._fetch_for_placement(options, {}, ctx={"data_dir": str(tmp_path)})
+        assert result["images"][0]["postId"] == 10
+        assert result["images"][0]["created_at"] == 1794009600
+    assert len(calls) == 1
+
+
 def test_domain_transport_runs_under_host_scope_and_denies_other_targets(
     server, monkeypatch
 ):
@@ -147,7 +226,6 @@ def test_public_feed_has_native_dimensions_and_fixed_safe_query(
             "height": 1536,
             "username": "alice",
             "permalink": "https://civitai.com/images/1",
-            "tags": [{"id": 10, "name": "landscape"}],
             "source_priority": 1,
         }
     ]
@@ -278,6 +356,31 @@ def test_unknown_positive_tag_name_is_an_error_without_unfiltered_feed(
     assert "numeric" in result["error"].lower()
     assert len(calls) == 1
     assert "/trpc/" not in calls[0]
+
+
+@pytest.mark.parametrize("users", ["", "alice"])
+def test_unknown_tag_with_saved_key_requests_exact_name_instead_of_another_key(
+    server, monkeypatch, tmp_path, users
+):
+    def response(url, query):
+        if "/trpc/" in url:
+            return {
+                "result": {
+                    "data": {"json": {"items": [{"id": 111763, "name": "outdoors"}]}}
+                }
+            }
+        return {"items": [image()]}
+
+    fake_network(monkeypatch, server, response)
+    result = server.fetch(
+        {"positive_tags": "outdoor", "users": users},
+        {"api_key_secret": "valid-test-key"},
+        ctx={"data_dir": str(tmp_path)},
+    )
+    message = result.get("warning", result.get("error", ""))
+    assert "outdoor" in message
+    assert "exact" in message.lower()
+    assert "add a civitai api key" not in message.lower()
 
 
 def test_public_sample_discovers_positive_names_without_authentication(
@@ -761,6 +864,7 @@ def test_guarded_stream_read_deadline_releases_lock_for_another_collection(
     opened, timeouts, closed = [], [], []
 
     class Response:
+        headers = {}
         fp = SimpleNamespace(
             raw=SimpleNamespace(
                 _sock=SimpleNamespace(settimeout=lambda value: timeouts.append(value))
@@ -834,6 +938,7 @@ def test_guarded_json_transport_handles_eof_and_enforces_two_mib_cap(
     socket = SimpleNamespace(settimeout=lambda value: None)
 
     class Response:
+        headers = {}
         fp = SimpleNamespace(raw=SimpleNamespace(_sock=socket))
 
         def __enter__(self):
@@ -900,13 +1005,7 @@ def test_engagement_minimums_are_inclusive_and_reuse_the_unfiltered_pool(
     ctx = {"data_dir": str(tmp_path)}
     result = server.fetch({"min_reactions": 10, "min_comments": 2}, {}, ctx=ctx)
     assert [entry["id"] for entry in result["images"]] == [1]
-    assert result["images"][0]["stats"] == {
-        "cryCount": 1,
-        "laughCount": 2,
-        "likeCount": 3,
-        "heartCount": 4,
-        "commentCount": 2,
-    }
+    assert "stats" not in result["images"][0]
     assert [
         entry["id"]
         for entry in server.fetch({"min_reactions": 9, "min_comments": 2}, {}, ctx=ctx)[
@@ -923,6 +1022,13 @@ def test_engagement_minimums_are_inclusive_and_reuse_the_unfiltered_pool(
     assert len(cache["pools"]) == 1
     saved = next(iter(cache["pools"].values()))["images"]
     assert len(saved) == 3
+    assert saved[0]["stats"] == {
+        "cryCount": 1,
+        "laughCount": 2,
+        "likeCount": 3,
+        "heartCount": 4,
+        "commentCount": 2,
+    }
     assert all(
         set(entry["stats"])
         == {"cryCount", "laughCount", "likeCount", "heartCount", "commentCount"}
@@ -1020,7 +1126,7 @@ def test_malformed_reaction_counts_fail_closed_without_blocking_valid_comments(
     )
     ctx = {"data_dir": str(tmp_path)}
     assert server.fetch({"min_reactions": 1}, {}, ctx=ctx)["images"] == []
-    result = server.fetch({"min_comments": 2}, {}, ctx=ctx)
+    result = server._fetch_for_placement({"min_comments": 2}, {}, ctx=ctx)
     assert [entry["id"] for entry in result["images"]] == [1]
     assert field not in result["images"][0]["stats"]
 

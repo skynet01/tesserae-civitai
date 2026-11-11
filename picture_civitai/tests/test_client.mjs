@@ -18,6 +18,43 @@ function image(id, width, height, extra = {}) {
 const landscape = { w: 1600, h: 1200 };
 const portrait = { w: 600, h: 900 };
 
+test("a pinned artwork wins over rotation and creator priority", () => {
+  const images = [image(1, 2400, 1600, { source_priority: 0 }), image(2, 2400, 1600)];
+  assert.equal(selectImage(images, landscape, { pinned_image: "2" }, { selectedId: 1 }).id, 2);
+});
+
+test("a pin cannot substitute another image or bypass physical eligibility", () => {
+  const images = [image(1, 2400, 1600), image(2, 1800, 2400), image(3, 800, 600)];
+  for (const pinned_image of ["2", "3", "999"]) {
+    assert.equal(selectImage(images, landscape, { pinned_image }, { selectedId: 1 }), null);
+  }
+});
+
+test("a failed pinned artwork cannot retry a different cached item", async () => {
+  const shadow = imageShadow([false, true]);
+  await render(shadow, { cell: { ...landscape, options: { pinned_image: "2" } }, data: {
+    images: [image(1, 2400, 1600), image(2, 2400, 1600)], selected_id: 1,
+  } });
+  assert.deepEqual(shadow.attempts, ["https://image.civitai.com/test/2.jpeg"]);
+  assert.match(shadow.innerHTML, /could not be loaded/);
+});
+
+test("Lexica artwork renders with its own credit and strict CDN", async () => {
+  const artwork = image("lexica:0482ee68-0368-4eca-8846-5930db866b33", 2400, 1600, {
+    provider: "lexica", username: "", url: "https://image.lexica.art/md/0482ee68-0368-4eca-8846-5930db866b33",
+    permalink: "https://lexica.art/?q=0482ee68-0368-4eca-8846-5930db866b33",
+  });
+  assert.equal(selectImage([artwork], landscape, {}, { now: 0 }).id, artwork.id);
+  const shadow = { innerHTML: "" };
+  await render(shadow, { cell: landscape, data: { images: [artwork] } });
+  assert.match(shadow.innerHTML, /src="https:\/\/image.lexica.art/);
+  assert.match(shadow.innerHTML, />Lexica<\/a>/);
+  assert.doesNotMatch(shadow.innerHTML, /Civitai artwork/);
+  for (const url of ["https://image.lexica.art.evil.test/a", "http://image.lexica.art/a", "https://image.civitai.com/a"]) {
+    assert.equal(selectImage([{...artwork, url}], landscape), null);
+  }
+});
+
 test("auto orientation follows the cell even on an oppositely oriented panel", () => {
   const images = [image(1, 2400, 1600), image(2, 1200, 1800)];
   assert.equal(selectImage(images, portrait, {}, { now: 0 }).id, 2);
@@ -181,9 +218,11 @@ function imageShadow(outcomes) {
       html = value;
       const src = value.match(/<img src="([^"]+)"/);
       if (!src) { current = undefined; return; }
-      const loaded = outcomes[attempts.length] === true;
+      const outcome = outcomes[attempts.length];
+      const [naturalWidth, naturalHeight] = Array.isArray(outcome) ? outcome
+        : outcome ? [2400, 1600] : [0, 0];
       attempts.push(src[1]);
-      current = { complete: true, naturalWidth: loaded ? 2400 : 0,
+      current = { complete: true, naturalWidth, naturalHeight,
         addEventListener() {}, removeEventListener() {}, async decode() {} };
     },
     querySelector() { return current; },
@@ -196,6 +235,52 @@ test("original CDN URLs use the actual source width without requesting an upscal
     url: "https://image.civitai.com/token/asset/original=true/painting.png",
   })] } });
   assert.deepEqual(shadow.attempts, ["https://image.civitai.com/token/asset/width=1024/painting.png"]);
+});
+
+test("Civitai downloads use the requested frame geometry and Fit or Fill", async () => {
+  const url = "https://image.civitai.com/token/asset/original=true/painting.png";
+  const data = { images: [image(1, 5120, 2560, { url })] };
+  for (const [scale, width] of [["fit", 800], ["fill", 1200]]) {
+    const shadow = imageShadow([true]);
+    await render(shadow, { cell: { w: 800, h: 600, options: { scale } }, data });
+    assert.deepEqual(shadow.attempts, [url.replace("original=true", `width=${width}`)]);
+  }
+});
+
+test("native-only mode verifies decoded size and can use the 4K original", async () => {
+  const url = "https://image.civitai.com/token/asset/original=true/painting.png";
+  const cell = { w: 3840, h: 2160, options: { resolution: "native_only" } };
+  const data = { images: [image(1, 5120, 2560, { url })] };
+  const full = imageShadow([[5120, 2560]]);
+  await render(full, { cell, data });
+  assert.deepEqual(full.attempts, [url]);
+  assert.match(full.innerHTML, /<img /);
+
+  const undersized = imageShadow([[2200, 1100]]);
+  await render(undersized, { cell, data });
+  assert.doesNotMatch(undersized.innerHTML, /<img /);
+});
+
+test("allow smaller keeps a 4K frame on the sized CDN rendition", async () => {
+  const url = "https://image.civitai.com/token/asset/original=true/painting.png";
+  const shadow = imageShadow([[2200, 1100]]);
+  await render(shadow, {
+    cell: { w: 3840, h: 2160, options: { resolution: "allow_smaller" } },
+    data: { images: [image(1, 5120, 2560, { url })] },
+  });
+  assert.deepEqual(shadow.attempts, [url.replace("original=true", "width=2200")]);
+  assert.match(shadow.innerHTML, /<img /);
+});
+
+test("strict native retries the original when the resized image decodes too small", async () => {
+  const url = "https://image.civitai.com/token/asset/original=true/painting.png";
+  const shadow = imageShadow([[800, 533], [2400, 1600]]);
+  await render(shadow, {
+    cell: { w: 1000, h: 600, options: { resolution: "native_only" } },
+    data: { images: [image(1, 2400, 1600, { url })] },
+  });
+  assert.deepEqual(shadow.attempts, [url.replace("original=true", "width=1000"), url]);
+  assert.match(shadow.innerHTML, /<img /);
 });
 
 test("a failed cached image retries another eligible image and keeps a successful result", async () => {

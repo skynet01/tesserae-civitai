@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import contextlib
 import contextvars
+import gzip
 import hashlib
+import io
 import itertools
 import json
 import math
@@ -15,13 +17,21 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import zlib
+from datetime import datetime
 from decimal import Decimal, InvalidOperation
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode, urlsplit
 
 API_URL = "https://civitai.com/api/v1/images"
 TAG_URL = "https://civitai.com/api/trpc/tag.getAll"
+COLLECTIONS_URL = "https://civitai.com/api/trpc/collection.getAllUser"
+COLLECTION_IMAGES_URL = "https://civitai.com/api/trpc/image.getInfinite"
+LEXICA_ENABLED = False
+LEXICA_URL = "https://lexica.art/api/v1/search"
+LEXICA_ID = r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}"
 MAX_IMAGES = 100
 MAX_RENDER_WAIT_S = 4.5
 REFRESH_DEADLINE_S = 4.0
@@ -30,10 +40,15 @@ STYLE_TAG_IDS = {"drawing": 81, "illustration": 5145, "painting": 7660}
 MAX_CALLS = 16
 MAX_IMAGE_CALLS = 8
 MAX_CACHE_BYTES = 2 * 1024 * 1024
+BATCH_GAP_SECONDS = 5 * 60
+BATCH_HISTORY_LIMIT = 64
+SORTS = ("Most Reactions", "Most Collected", "Most Comments", "Newest")
 REACTION_FIELDS = ("cryCount", "laughCount", "likeCount", "heartCount")
 STAT_FIELDS = (*REACTION_FIELDS, "commentCount")
+ARTWORK_FIELDS = ("id", "url", "width", "height", "username", "permalink", "provider")
 _LOCK = threading.Lock()
 _HIST_LOCK = threading.Lock()
+_CHOICES_LOCK = threading.Lock()
 
 
 class FeedError(ValueError):
@@ -47,8 +62,14 @@ def _api_url(url: str) -> bool:
         parsed = urlsplit(url)
         return (
             parsed.scheme == "https"
-            and parsed.netloc == "civitai.com"
-            and parsed.path in ("/api/v1/images", "/api/trpc/tag.getAll")
+            and (parsed.netloc, parsed.path)
+            in (
+                ("civitai.com", "/api/v1/images"),
+                ("civitai.com", "/api/trpc/tag.getAll"),
+                ("civitai.com", "/api/trpc/collection.getAllUser"),
+                ("civitai.com", "/api/trpc/image.getInfinite"),
+                ("lexica.art", "/api/v1/search"),
+            )
             and not parsed.fragment
         )
     except ValueError:
@@ -57,8 +78,11 @@ def _api_url(url: str) -> bool:
 
 class _ApiRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
-        if not _api_url(newurl):
-            raise FeedError("Civitai redirected outside its supported API.")
+        if (
+            not _api_url(newurl)
+            or urlsplit(newurl).netloc != urlsplit(req.full_url).netloc
+        ):
+            raise FeedError("Gallery redirected outside its supported API.")
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
@@ -78,22 +102,22 @@ def fetch_json(
     timeout: float = 2,
     max_bytes: int = MAX_CACHE_BYTES,
 ) -> Any:
-    """Fixed-domain HTTPS transport with a total body deadline and byte cap.
+    """Fixed-domain HTTPS transport with a body deadline and wire/decoded caps.
 
     DNS/connect are still subject to the operating system's timing; fetch()'s
     caller wait is bounded independently. read1 avoids a continuously streaming
     body extending the shared refresh indefinitely between deadline checks.
     """
     if not _api_url(url):
-        raise FeedError(
-            "Only the fixed Civitai image and image-tag APIs are supported."
-        )
+        raise FeedError("Only the fixed Civitai and Lexica APIs are supported.")
     if not 0 < timeout <= 2 or not 0 < max_bytes <= MAX_CACHE_BYTES:
         raise ValueError("Invalid Civitai network limits")
     deadline = time.monotonic() + timeout
     request = urllib.request.Request(url, headers=headers or {})
+    request.add_header("Accept-Encoding", "gzip")
     opener = _api_opener()
     with opener.open(request, timeout=timeout) as response:
+        encoding = response.headers.get("Content-Encoding", "identity").strip().lower()
         body = bytearray()
         while True:
             remaining = deadline - time.monotonic()
@@ -116,6 +140,18 @@ def fetch_json(
             body.extend(chunk)
             if len(body) > max_bytes:
                 raise ValueError("Civitai response exceeds byte cap")
+    if encoding == "gzip":
+        try:
+            with gzip.GzipFile(fileobj=io.BytesIO(body)) as stream:
+                body = stream.read(max_bytes + 1)
+        except (EOFError, OSError, zlib.error) as err:
+            raise FeedError("Gallery returned invalid compressed data.") from err
+        if len(body) > max_bytes:
+            raise ValueError("Civitai response exceeds byte cap")
+    elif encoding != "identity":
+        raise FeedError("Gallery returned an unsupported response encoding.")
+    if time.monotonic() >= deadline:
+        raise TimeoutError("Civitai response deadline exceeded")
     return json.loads(body.decode("utf-8"))
 
 
@@ -178,7 +214,7 @@ def _image_url(value: Any) -> bool:
         parsed = urlsplit(value)
         return (
             parsed.scheme == "https"
-            and parsed.netloc == "image.civitai.com"
+            and parsed.netloc in ("image.civitai.com", "image.lexica.art")
             and not parsed.fragment
             and bool(parsed.path)
             and not parsed.path.casefold().endswith(
@@ -215,6 +251,7 @@ def _image(entry: Any) -> dict[str, Any] | None:
         return None
     if (
         not _image_url(entry.get("url"))
+        or urlsplit(entry["url"]).netloc != "image.civitai.com"
         or not _integer(entry.get("width"))
         or not _integer(entry.get("height"))
         or entry["width"] > 50000
@@ -244,47 +281,88 @@ def _image(entry: Any) -> dict[str, Any] | None:
     stats = _stats(entry.get("stats"))
     if stats:
         clean["stats"] = stats
+    if _integer(entry.get("postId")):
+        clean["postId"] = entry["postId"]
+    posted = entry.get("created_at")
+    if not _integer(posted):
+        raw_date = entry.get("createdAt")
+        if isinstance(raw_date, str) and len(raw_date) <= 40:
+            with contextlib.suppress(ValueError, OverflowError, OSError):
+                date = datetime.fromisoformat(raw_date)
+                if date.tzinfo is not None:
+                    posted = int(date.timestamp())
+    if _integer(posted):
+        clean["created_at"] = posted
+    collections = entry.get("collection_ids")
+    if isinstance(collections, list):
+        clean["collection_ids"] = [
+            value
+            for value in collections[:8]
+            if isinstance(value, str)
+            and len(value) <= 10
+            and value.isascii()
+            and value.isdecimal()
+            and 0 < int(value) <= 2147483647
+        ]
     return clean
 
 
 def _load(path: Path) -> dict[str, Any]:
     try:
-        if path.stat().st_size <= MAX_CACHE_BYTES:
-            data = json.loads(path.read_text(encoding="utf-8"))
-            if (
-                isinstance(data, dict)
-                and isinstance(data.get("pools"), dict)
-                and isinstance(data.get("tags"), dict)
-            ):
-                pools = {
-                    key: record
-                    for key, record in list(data["pools"].items())[-8:]
-                    if isinstance(record, dict)
-                    and all(
-                        isinstance(record.get(field, 0), (int, float))
-                        and math.isfinite(record.get(field, 0))
-                        for field in ("fetched", "attempted", "retry_at")
-                    )
-                }
-                tags = {
-                    name: record
-                    for name, record in list(data["tags"].items())[-4096:]
-                    if isinstance(record, dict)
-                    and _integer(record.get("id"))
-                    and isinstance(record.get("at"), (int, float))
-                    and math.isfinite(record["at"])
-                }
-                retry = data.get("retry_at", 0)
-                return {
-                    "pools": pools,
-                    "tags": tags,
-                    "retry_at": retry
-                    if isinstance(retry, (int, float)) and math.isfinite(retry)
-                    else 0,
-                }
-    except (OSError, ValueError):
+        stat = path.stat()
+        if stat.st_size <= MAX_CACHE_BYTES:
+            version = (
+                stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns
+            )
+            snapshot = _load_snapshot(path, version)
+            # Callers replace records in these maps and leave their nested values read-only.
+            return {
+                **snapshot,
+                "pools": dict(snapshot["pools"]),
+                "tags": dict(snapshot["tags"]),
+            }
+    except (OSError, ValueError, OverflowError):
         pass
     return {"pools": {}, "tags": {}}
+
+
+@lru_cache(maxsize=4)
+def _load_snapshot(path: Path, _version: tuple[int, ...]) -> dict[str, Any]:
+    with path.open("rb") as handle:
+        body = handle.read(MAX_CACHE_BYTES + 1)
+    if len(body) > MAX_CACHE_BYTES:
+        return {"pools": {}, "tags": {}}
+    data = json.loads(body)
+    if (
+        not isinstance(data, dict)
+        or not isinstance(data.get("pools"), dict)
+        or not isinstance(data.get("tags"), dict)
+    ):
+        return {"pools": {}, "tags": {}}
+    pools = {
+        key: record
+        for key, record in list(data["pools"].items())[-8:]
+        if isinstance(record, dict)
+        and all(
+            isinstance(record.get(field, 0), (int, float))
+            and math.isfinite(record.get(field, 0))
+            for field in ("fetched", "attempted", "retry_at")
+        )
+    }
+    tags = {
+        name: record
+        for name, record in list(data["tags"].items())[-4096:]
+        if isinstance(record, dict)
+        and _integer(record.get("id"))
+        and isinstance(record.get("at"), (int, float))
+        and math.isfinite(record["at"])
+    }
+    retry = data.get("retry_at", 0)
+    return {
+        "pools": pools,
+        "tags": tags,
+        "retry_at": retry if isinstance(retry, (int, float)) and math.isfinite(retry) else 0,
+    }
 
 
 def _save(path: Path, state: dict[str, Any]) -> None:
@@ -333,10 +411,56 @@ def _cached_images(record: dict[str, Any]) -> list[dict[str, Any]]:
 def fetch(
     options: dict[str, Any], settings: dict[str, Any], *, ctx: dict[str, Any]
 ) -> dict[str, Any]:
+    result = _fetch_for_placement(options, settings, ctx=ctx)
+    keys = (*ARTWORK_FIELDS, "source_priority")
+    return {
+        **result,
+        "images": [
+            {key: image[key] for key in keys if key in image}
+            for image in result["images"]
+        ],
+    }
+
+
+def _fetch_for_placement(
+    options: dict[str, Any], settings: dict[str, Any], *, ctx: dict[str, Any]
+) -> dict[str, Any]:
     """Apply placement minimums and durable rotation to the shared image pool."""
+    pinned = options.get("pinned_image", "")
+    if not isinstance(pinned, str) or (
+        pinned.strip() and not _history_id(pinned.strip())
+    ):
+        return {
+            "images": [],
+            "error": "Choose a valid pinned artwork from Lineups, or clear the pin.",
+        }
+    pinned = pinned.strip()
+    provider = options.get("provider", "civitai")
+    if not LEXICA_ENABLED:
+        if pinned.startswith("lexica:"):
+            return {
+                "images": [],
+                "error": "Lexica artwork is paused. Clear the pin to use Civitai.",
+            }
+        if provider in ("lexica", "both"):
+            provider = "civitai"
+            options = {**options, "provider": provider}
+    if provider not in ("civitai", "lexica", "both"):
+        return {
+            "images": [],
+            "error": "Choose a supported gallery service.",
+        }
     try:
-        reactions = _minimum(options.get("min_reactions", 0), "reactions")
-        comments = _minimum(options.get("min_comments", 0), "comments")
+        reactions = (
+            _minimum(options.get("min_reactions", 0), "reactions")
+            if provider != "lexica"
+            else 0
+        )
+        comments = (
+            _minimum(options.get("min_comments", 0), "comments")
+            if provider != "lexica"
+            else 0
+        )
     except FeedError as err:
         return {"images": [], "error": str(err)}
     try:
@@ -353,6 +477,9 @@ def fetch(
         images = result["images"]
         filtered = []
         for candidate in images:
+            if candidate.get("provider") == "lexica":
+                filtered.append(candidate)
+                continue
             stats = candidate.get("stats", {})
             if reactions and (
                 not all(field in stats for field in REACTION_FIELDS)
@@ -373,7 +500,297 @@ def fetch(
                 else {}
             ),
         }
+    if pinned:
+        selected = next(
+            (
+                image
+                for image in _eligible_for_context(result["images"], options, ctx)
+                if str(image["id"]) == pinned
+            ),
+            None,
+        )
+        if selected is None:
+            return {
+                **result,
+                "images": [],
+                "error": "The pinned artwork is unavailable or does not match this frame and its filters. Choose another artwork or clear the pin.",
+            }
+        return {**result, "images": [selected], "selected_id": selected["id"]}
+    if ctx.get("_lineup_cache_only"):
+        return result
     return _select_rotation(result, options, ctx, repeat_days)
+
+
+def _eligible_for_context(
+    images: Any, options: dict[str, Any], ctx: dict[str, Any]
+) -> list[dict[str, Any]]:
+    width, height = ctx.get("cell_w"), ctx.get("cell_h")
+    if not _integer(width) or not _integer(height):
+        if (
+            options.get("orientation") not in ("landscape", "portrait", "any")
+            or options.get("resolution") != "allow_smaller"
+        ):
+            return []
+        # Explicit orientation with unrestricted size does not depend on geometry.
+        width = height = 1
+    return _rotation_candidates(images, options, width, height)
+
+
+def _thumbnail(image: dict[str, Any], width: int = 480) -> str:
+    if image.get("provider") == "lexica":
+        return image.get("thumbnail", image["url"])
+    return re.sub(
+        r"/(?:original=true|width=\d+[^/]*)/",
+        f"/width={min(width, image['width'])}/",
+        image["url"],
+        count=1,
+    )
+
+
+def lineup_items(
+    options: dict[str, Any] | None = None, *, ctx: dict[str, Any] | None = None
+) -> list[dict[str, str]]:
+    """List this frame's eligible cached artworks without fetching or rotating."""
+    from flask import current_app, has_app_context
+
+    if not has_app_context():
+        return []
+    registry = current_app.config.get("PLUGIN_REGISTRY")
+    plugin = registry.get("picture_civitai") if registry is not None else None
+    if plugin is None:
+        return []
+    effective = {
+        field["name"]: field.get("default")
+        for field in plugin.manifest.get("cell_options", [])
+    }
+    effective.update(options or {})
+    effective["pinned_image"] = ""
+    context = {
+        "data_dir": str(plugin.data_dir),
+        **(ctx or {}),
+        "preview": True,
+        "settled": False,
+        "_lineup_cache_only": True,
+    }
+    store = current_app.config.get("SETTINGS_STORE")
+    settings = (
+        store.get_for_runtime(
+            "plugins", "picture_civitai", plugin.manifest.get("settings", [])
+        )
+        if store is not None
+        else {}
+    )
+    result = _fetch_for_placement(effective, settings, ctx=context)
+    images = _eligible_for_context(result.get("images"), effective, context)
+    return [
+        {
+            "key": str(image["id"]),
+            "label": f"{image['username']} / {image['id']}"
+            if image.get("username")
+            else f"Lexica / {image.get('prompt', '')[:120]}"
+            if image.get("provider") == "lexica"
+            else f"Artwork {image['id']}",
+            "thumb": _thumbnail(image, 320),
+        }
+        for image in images[:MAX_IMAGES]
+    ]
+
+
+def _api_key(settings: dict[str, Any]) -> str:
+    value = settings.get("api_key_secret", settings.get("api_key", ""))
+    if (
+        not isinstance(value, str)
+        or len(value) > 1000
+        or any(ord(c) < 32 for c in value)
+    ):
+        raise FeedError("The Civitai API key is invalid.")
+    return value.strip()
+
+
+def _trpc(url: str, payload: dict[str, Any], key: str, *, timeout: float = 2) -> Any:
+    response = fetch_json(
+        f"{url}?{urlencode({'input': json.dumps({'json': payload})})}",
+        headers={
+            "Accept": "application/json",
+            "User-Agent": "tesserae (+picture_civitai)",
+            "Authorization": f"Bearer {key}",
+        },
+        timeout=timeout,
+    )
+    try:
+        return response["result"]["data"]["json"]
+    except (KeyError, TypeError):
+        raise FeedError("Civitai returned an unreadable collection response.") from None
+
+
+def choices(name: str) -> list[dict[str, str]]:
+    """Own and followed image collections, cached per credential for 15 minutes."""
+    from flask import current_app, has_app_context
+
+    if name != "collections" or not has_app_context():
+        return []
+    registry = current_app.config.get("PLUGIN_REGISTRY")
+    plugin = registry.get("picture_civitai") if registry is not None else None
+    store = current_app.config.get("SETTINGS_STORE")
+    if plugin is None or store is None:
+        return []
+    settings = store.get_for_runtime(
+        "plugins", "picture_civitai", plugin.manifest.get("settings", [])
+    )
+    try:
+        key = _api_key(settings)
+    except FeedError as err:
+        return [{"value": "", "label": str(err)}]
+    if not key:
+        return [
+            {
+                "value": "",
+                "label": "Add a Civitai API key with collection read access in widget settings.",
+            }
+        ]
+    path = Path(plugin.data_dir) / "civitai-collection-choices.json"
+    identity = hashlib.sha256(key.encode()).hexdigest()[:16]
+    with _CHOICES_LOCK:
+        state = _load(path)
+        record = state["pools"].get(identity, {})
+        now = time.time()
+        if not 0 <= now - record.get("fetched", 0) < 900 and now >= record.get(
+            "retry_at", 0
+        ):
+            try:
+                rows = _collection_choices(key)
+                record = {"choices": rows, "fetched": now, "attempted": now}
+            except (OSError, ValueError, TimeoutError) as err:
+                record = {
+                    **record,
+                    "error": "Could not list Civitai collections. Check collection read access, or try again shortly.",
+                    "retry_at": now + _collection_retry_delay(err),
+                    "attempted": now,
+                }
+            state["pools"][identity] = record
+            _save(path, state)
+    rows = record.get("choices", [])
+    message = record.get("error")
+    if not rows and not message:
+        message = "No own or followed image collections found. Follow a collection on Civitai, then reopen settings after 15 minutes."
+    return ([{"value": "", "label": message}] if message else []) + rows
+
+
+def _collection_choices(key: str) -> list[dict[str, str]]:
+    data = _trpc(
+        COLLECTIONS_URL,
+        {"type": "Image", "permission": "VIEW", "contributingOnly": True},
+        key,
+    )
+    if not isinstance(data, list):
+        raise FeedError("Unreadable collections")
+    rows = {}
+    for entry in data[:500]:
+        if (
+            not isinstance(entry, dict)
+            or not _integer(entry.get("id"))
+            or entry["id"] > 2147483647
+            or entry.get("type") != "Image"
+            or not isinstance(entry.get("name"), str)
+        ):
+            continue
+        owner = entry.get("ownerUsername")
+        suffix = "yours" if entry.get("isOwner") is True else "followed"
+        if suffix == "followed" and isinstance(owner, str) and owner:
+            suffix += f", by {owner[:100]}"
+        ident = str(entry["id"])
+        rows.setdefault(
+            ident, {"value": ident, "label": f"{entry['name'][:200]} ({suffix})"}
+        )
+    return list(rows.values())
+
+
+def _collection_retry_delay(err: Exception) -> int:
+    delay = 60
+    if isinstance(err, urllib.error.HTTPError):
+        if err.code == 429:
+            delay = 120
+            with contextlib.suppress(ValueError, TypeError):
+                delay = max(60, min(3600, int(err.headers.get("Retry-After", "120"))))
+        err.close()
+    return delay
+
+
+def query_preview(
+    options: dict[str, Any], settings: dict[str, Any], *, ctx: dict[str, Any]
+) -> dict[str, Any]:
+    """Show the same eligible pool as a display, without advancing history."""
+    result = _fetch_for_placement(
+        {**options, "pinned_image": ""},
+        settings,
+        ctx={**ctx, "preview": True, "settled": False},
+    )
+    if not result.get("images"):
+        return {**result, "total": 0}
+    width, height = ctx.get("cell_w"), ctx.get("cell_h")
+    if not _integer(width) or not _integer(height):
+        return {
+            "images": [],
+            "total": 0,
+            "error": "Choose a target cell size to preview these filters.",
+        }
+    pool = _rotation_candidates(result.get("images"), options, width, height)
+    sources = options.get("sources", ["tags", "creators"])
+    sources = sources if isinstance(sources, list) else []
+    positives, users = [], []
+    # A failed optional source must not make the other sources' preview fail.
+    with contextlib.suppress(FeedError):
+        positives = _terms(options.get("positive_tags", ""), 6, "positive tags")
+    with contextlib.suppress(FeedError):
+        if "creators" in sources:
+            users = _terms(options.get("users", ""), 4, "creators")
+    collection_labels = {}
+    if any(image.get("collection_ids") for image in pool):
+        identity = hashlib.sha256(_api_key(settings).encode()).hexdigest()[:16]
+        cached = _load(Path(ctx["data_dir"]) / "civitai-collection-choices.json")
+        collection_labels = {
+            row["value"]: row["label"]
+            for row in cached["pools"].get(identity, {}).get("choices", [])
+            if isinstance(row, dict)
+            and isinstance(row.get("value"), str)
+            and isinstance(row.get("label"), str)
+        }
+    images = []
+    keys = (*ARTWORK_FIELDS, "prompt")
+    for image in pool[:20]:
+        matches = []
+        if image.get("provider") == "lexica":
+            matches.append(f"Search: {options.get('lexica_query', '').strip()}")
+            matches.extend(
+                f"Prompt: {term}"
+                for term in positives
+                if _prompt_match(image["prompt"], term)
+            )
+        else:
+            matches.extend(
+                f"Collection: {collection_labels.get(ident, ident)}"
+                for ident in image.get("collection_ids", [])
+            )
+            if image["username"].casefold() in users:
+                matches.append(f"Creator: {image['username']}")
+            names = {tag["name"].casefold() for tag in image["tags"]}
+            ids = {str(tag["id"]) for tag in image["tags"]}
+            if "tags" in sources:
+                matches.extend(
+                    f"Tag: {term}" for term in positives if term in names or term in ids
+                )
+        thumbnail = _thumbnail(image)
+        display = {key: image[key] for key in keys if key in image}
+        images.append({**display, "thumbnail": thumbnail, "matches": matches or ["Public feed"]})
+    return {
+        "images": images,
+        "total": len(pool),
+        **{
+            key: result[key]
+            for key in ("error", "warning", "stale", "live_refresh_s")
+            if key in result
+        },
+    }
 
 
 def _rotation_candidates(
@@ -391,7 +808,10 @@ def _rotation_candidates(
     for image in images if isinstance(images, list) else []:
         if (
             not isinstance(image, dict)
-            or not _integer(image.get("id"))
+            or not (
+                _integer(image.get("id"))
+                or (image.get("provider") == "lexica" and _history_id(image.get("id")))
+            )
             or not _integer(image.get("width"))
             or not _integer(image.get("height"))
             or not _image_url(image.get("url"))
@@ -423,10 +843,37 @@ def _history_time(value: Any) -> bool:
 
 
 def _history_id(value: Any) -> bool:
-    return (
-        isinstance(value, str)
-        and re.fullmatch(r"[1-9][0-9]{0,15}", value) is not None
-        and int(value) <= 2**53 - 1
+    return isinstance(value, str) and (
+        (
+            re.fullmatch(r"[1-9][0-9]{0,15}", value) is not None
+            and int(value) <= 2**53 - 1
+        )
+        or re.fullmatch(f"lexica:{LEXICA_ID}", value) is not None
+    )
+
+
+def _art_batch(image: dict[str, Any]) -> tuple[int, str, int]:
+    post = image.get("postId", 0)
+    posted = image.get("created_at", 0)
+    creator = image.get("username", "").strip().casefold()
+    author = (
+        hashlib.blake2s(creator.encode(errors="replace"), digest_size=8).hexdigest()
+        if creator and posted
+        else ""
+    )
+    return post, author, posted
+
+
+def _same_batch(first: tuple[int, str, int], second: tuple[int, str, int]) -> bool:
+    post, author, posted = first
+    other_post, other_author, other_posted = second
+    return bool(
+        (post and post == other_post)
+        or (
+            author
+            and author == other_author
+            and abs(posted - other_posted) <= BATCH_GAP_SECONDS
+        )
     )
 
 
@@ -459,9 +906,27 @@ def _read_history(path: Path) -> dict[str, Any]:
                 if isinstance(seen, dict)
                 else {}
             )
+            seen = dict(sorted(seen.items(), key=lambda item: item[1])[-512:])
+            batches = record.get("batches")
+            valid_batches = {}
+            if isinstance(batches, dict):
+                for ident in seen:
+                    batch = batches.get(ident)
+                    if (
+                        isinstance(batch, list)
+                        and len(batch) == 3
+                        and type(batch[0]) is int
+                        and 0 <= batch[0] <= 2**53 - 1
+                        and isinstance(batch[1], str)
+                        and re.fullmatch(r"[0-9a-f]{16}|", batch[1]) is not None
+                        and type(batch[2]) is int
+                        and 0 <= batch[2] <= 2**53 - 1
+                    ):
+                        valid_batches[ident] = tuple(batch)
             cleaned[key] = {
                 "updated": record["updated"],
-                "seen": dict(sorted(seen.items(), key=lambda item: item[1])[-512:]),
+                "seen": seen,
+                "batches": dict(list(valid_batches.items())[-BATCH_HISTORY_LIMIT:]),
                 "bucket": record.get("bucket")
                 if isinstance(record.get("bucket"), str)
                 and len(record["bucket"]) <= 100
@@ -552,6 +1017,18 @@ def _select_rotation(
             image for image in pool if seen.get(str(image["id"]), -math.inf) <= cutoff
         ]
         candidates = rested if repeat_days and rested else pool
+        batches = record.get("batches", {})
+        recent_batches = [
+            batch for ident, batch in batches.items() if seen.get(ident, -math.inf) > cutoff
+        ]
+        if recent_batches and rested:
+            unrelated = []
+            for image in rested:
+                batch = _art_batch(image)
+                if not any(_same_batch(batch, recent) for recent in recent_batches):
+                    unrelated.append(image)
+            candidates = unrelated or rested
+        prioritize_fresh = options.get("prioritize_fresh") is True
 
         def order(image: dict[str, Any]) -> tuple[Any, ...]:
             ident = str(image["id"])
@@ -559,18 +1036,24 @@ def _select_rotation(
             tie = hashlib.sha256(f"{key}:{bucket}:{ident}".encode()).hexdigest()
             if repeat_days and not rested:
                 return seen.get(ident, -math.inf), priority, tie
-            return priority, tie
+            return priority, -image.get("created_at", 0) if prioritize_fresh else 0, tie
 
         selected = min(candidates, key=order)
         preview = bool(ctx.get("preview"))
         if not preview and ctx.get("settled", not preview):
             # This records the scheduled primary, not a delivery acknowledgement.
             # A client-side image-load fallback does not write another history entry.
+            ident = str(selected["id"])
+            batch = _art_batch(selected)
+            if batch[0] or batch[1]:
+                batches.pop(ident, None)
+                batches[ident] = batch
             records[key] = {
                 "updated": now,
-                "seen": {**seen, str(selected["id"]): now},
+                "seen": {**seen, ident: now},
+                "batches": dict(list(batches.items())[-BATCH_HISTORY_LIMIT:]),
                 "bucket": bucket,
-                "selected": str(selected["id"]),
+                "selected": ident,
             }
             _write_history(path, records)
     return {**result, "selected_id": selected["id"]}
@@ -584,11 +1067,11 @@ def _fetch_pool(
     metadata = {"placement_id": placement}
     if _integer(ctx.get("cell_w")) and _integer(ctx.get("cell_h")):
         metadata.update(target_w=ctx["cell_w"], target_h=ctx["cell_h"])
+    cached = _fetch(options, settings, ctx, allow_network=False)
+    if ctx.get("_lineup_cache_only") or not cached.get("live_refresh_s"):
+        return {**cached, **metadata}
     if not _LOCK.acquire(blocking=False):
-        return {
-            **_fetch(options, settings, ctx, allow_network=False),
-            **metadata,
-        }
+        return {**cached, **metadata}
     result: list[dict[str, Any]] = []
     failures: list[BaseException] = []
     copied_context = contextvars.copy_context()
@@ -615,15 +1098,413 @@ def _fetch_pool(
     worker.join(MAX_RENDER_WAIT_S)
     if failures:
         raise failures[0]
+    if result:
+        return {**result[0], **metadata}
+    # Another source in this refresh may already have written a usable pool.
+    return {**_fetch(options, settings, ctx, allow_network=False), **metadata}
+
+
+def _prompt_match(prompt: str, term: str) -> bool:
+    return (
+        re.search(r"(?<!\w)" + re.escape(term) + r"(?!\w)", prompt.casefold())
+        is not None
+    )
+
+
+def _lexica_image(entry: Any) -> dict[str, Any] | None:
+    if not isinstance(entry, dict):
+        return None
+    ident = entry.get("id")
+    if not isinstance(ident, str) or re.fullmatch(LEXICA_ID, ident) is None:
+        return None
+    if (
+        entry.get("nsfw") is not False
+        or entry.get("grid") is not False
+        or not _integer(entry.get("width"))
+        or not _integer(entry.get("height"))
+        or max(entry["width"], entry["height"]) > 50000
+        or not isinstance(entry.get("prompt"), str)
+        or len(entry["prompt"]) > 8000
+        or not _image_url(entry.get("src"))
+        or urlsplit(entry["src"]).netloc != "image.lexica.art"
+    ):
+        return None
+    thumbnail = entry.get("srcSmall")
     return {
-        **(
-            result[0] if result else _fetch(options, settings, ctx, allow_network=False)
-        ),
-        **metadata,
+        "id": f"lexica:{ident}",
+        "provider": "lexica",
+        "url": entry["src"],
+        "thumbnail": thumbnail
+        if _image_url(thumbnail) and urlsplit(thumbnail).netloc == "image.lexica.art"
+        else entry["src"],
+        "width": entry["width"],
+        "height": entry["height"],
+        "prompt": entry["prompt"],
+        "permalink": f"https://lexica.art/?q={ident}",
+        "username": "",
+        "tags": [],
+        "source_priority": 1,
     }
 
 
+def _fetch_lexica(
+    options: dict[str, Any], ctx: dict[str, Any], *, allow_network: bool
+) -> dict[str, Any]:
+    try:
+        query = options.get("lexica_query", "")
+        if not isinstance(query, str) or not 1 <= len(query.strip()) <= 300:
+            raise FeedError("Enter a Lexica search of 1 to 300 characters.")
+        query = query.strip()
+        positives = _terms(options.get("positive_tags", ""), 6, "positive prompt terms")
+        negatives = _terms(
+            options.get("negative_tags", ""), 50, "negative prompt terms"
+        )
+        match = options.get("tag_match", "any")
+        if match not in ("any", "all"):
+            raise FeedError("Choose Any or All for prompt matching.")
+        refresh = float(options.get("refresh_hours", 24))
+        if not 1 <= refresh <= 168:
+            raise FeedError("Choose a collection refresh between 1 and 168 hours.")
+    except (FeedError, TypeError, ValueError) as err:
+        return {
+            "images": [],
+            "error": str(err)
+            if isinstance(err, FeedError)
+            else "Check the collection refresh setting.",
+        }
+    path = Path(ctx["data_dir"]) / "lexica-cache.json"
+    state = _load(path)
+    key = hashlib.sha256(query.encode()).hexdigest()
+    record = state["pools"].get(key, {})
+    now = time.time()
+    metadata = {}
+    fresh = 0 <= now - record.get("fetched", 0) < refresh * 3600
+    if (
+        not fresh
+        and now >= max(record.get("retry_at", 0), state.get("retry_at", 0))
+        and allow_network
+    ):
+        try:
+            response = fetch_json(
+                f"{LEXICA_URL}?{urlencode({'q': query})}",
+                headers={
+                    "Accept": "application/json",
+                    "User-Agent": "tesserae (+picture_civitai)",
+                },
+            )
+            if not isinstance(response, dict) or not isinstance(
+                response.get("images"), list
+            ):
+                raise FeedError("Lexica returned an unreadable image collection.")
+            raw = [entry for entry in response["images"][:50] if _lexica_image(entry)]
+            record = {"images": raw, "fetched": now, "attempted": now}
+        except (OSError, ValueError, TimeoutError) as err:
+            delay = 60
+            if isinstance(err, urllib.error.HTTPError):
+                if err.code == 429:
+                    delay = 120
+                    with contextlib.suppress(ValueError, TypeError):
+                        delay = max(
+                            60, min(3600, int(err.headers.get("Retry-After", "120")))
+                        )
+                    state["retry_at"] = now + delay
+                err.close()
+            record = {
+                **record,
+                "error": "Could not load Lexica images. Try again shortly.",
+                "retry_at": now + delay,
+                "attempted": now,
+            }
+        state["pools"][key] = record
+        _save(path, state)
+    elif not fresh and now < state.get("retry_at", 0):
+        metadata = {"error": "Lexica is rate limited. Try again shortly."}
+    elif not fresh and not allow_network and now >= record.get("retry_at", 0):
+        metadata = {
+            "error": "Lexica collection is updating. Try again shortly.",
+            "live_refresh_s": 2,
+        }
+    if "error" in record:
+        metadata["error"] = record["error"]
+    raw = record.get("images", [])
+    images = []
+    for entry in raw[:50] if isinstance(raw, list) else []:
+        image = _lexica_image(entry)
+        if image is None:
+            continue
+        prompt = image["prompt"]
+        if any(_prompt_match(prompt, term) for term in negatives):
+            continue
+        if positives and not (all if match == "all" else any)(
+            _prompt_match(prompt, term) for term in positives
+        ):
+            continue
+        images.append(image)
+    if images and metadata:
+        metadata["stale"] = True
+    return {"images": images, **metadata}
+
+
 def _fetch(
+    options: dict[str, Any],
+    settings: dict[str, Any],
+    ctx: dict[str, Any],
+    *,
+    allow_network: bool = True,
+) -> dict[str, Any]:
+    if options.get("provider") == "both":
+        civitai = _fetch(
+            {**options, "provider": "civitai"},
+            settings,
+            ctx,
+            allow_network=allow_network,
+        )
+        lexica = _fetch_lexica(options, ctx, allow_network=allow_network)
+        return _merge_pools([("Civitai", civitai), ("Lexica", lexica)])
+    if options.get("provider") == "lexica":
+        return _fetch_lexica(options, ctx, allow_network=allow_network)
+    if options.get("prioritize_fresh") is True:
+        options = {**options, "sort": "Newest"}
+    sources = options.get("sources", ["tags", "creators"])
+    if not isinstance(sources, list) or any(
+        value not in ("tags", "creators", "collections") for value in sources
+    ):
+        return {"images": [], "error": "Choose supported Civitai artwork sources."}
+    feeds = []
+    effective = {
+        **options,
+        "positive_tags": options.get("positive_tags", "") if "tags" in sources else "",
+        "users": options.get("users", "") if "creators" in sources else "",
+    }
+    if "tags" in sources or ("creators" in sources and effective["users"]):
+        feeds.append(
+            (
+                "Tags and creators",
+                _fetch_civitai(effective, settings, ctx, allow_network=allow_network),
+            )
+        )
+    if "collections" in sources:
+        feeds.insert(
+            0,
+            (
+                "Collections",
+                _fetch_collections(options, settings, ctx, allow_network=allow_network),
+            ),
+        )
+    if not feeds:
+        return {
+            "images": [],
+            "error": "Choose at least one artwork source, and enter creators when using only Creators.",
+        }
+    return feeds[0][1] if len(feeds) == 1 else _merge_pools(feeds)
+
+
+def _merge_pools(feeds: list[tuple[str, dict[str, Any]]]) -> dict[str, Any]:
+    """Interleave bounded pools, retaining provenance when sources overlap."""
+    images = {}
+    for row in itertools.zip_longest(*(feed["images"] for _, feed in feeds)):
+        for image in row:
+            if image is None:
+                continue
+            ident = str(image["id"])
+            if ident not in images and len(images) < MAX_IMAGES:
+                images[ident] = dict(image)
+            elif ident in images:
+                collections = list(
+                    dict.fromkeys(
+                        [
+                            *images[ident].get("collection_ids", []),
+                            *image.get("collection_ids", []),
+                        ]
+                    )
+                )
+                if collections:
+                    images[ident]["collection_ids"] = collections[:8]
+                if image.get("source_priority") == 0:
+                    images[ident]["source_priority"] = 0
+    combined: dict[str, Any] = {"images": list(images.values())}
+    notices = [
+        f"{name}: {feed[field]}"
+        for name, feed in feeds
+        for field in ("error", "warning")
+        if feed.get(field)
+    ]
+    if notices:
+        combined["warning" if images else "error"] = " ".join(notices)
+    if any(feed.get("stale") for _, feed in feeds):
+        combined["stale"] = True
+    refreshes = [
+        feed["live_refresh_s"] for _, feed in feeds if feed.get("live_refresh_s")
+    ]
+    if refreshes:
+        combined["live_refresh_s"] = min(refreshes)
+    return combined
+
+
+def _collection_image(entry: Any, ident: str) -> dict[str, Any] | None:
+    if (
+        not isinstance(entry, dict)
+        or type(entry.get("nsfwLevel")) is not int
+        or entry.get("nsfwLevel") != 1
+        or entry.get("ingestion") != "Scanned"
+        or entry.get("blockedFor")
+        or entry.get("needsReview")
+        or entry.get("type") != "image"
+        or entry.get("collectionItemStatus", "ACCEPTED") != "ACCEPTED"
+    ):
+        return None
+    url = entry.get("url")
+    if isinstance(url, str) and re.fullmatch(LEXICA_ID, url):
+        url = f"https://image.civitai.com/xG1nkqKTMzGDvpLrqFT7WA/{url}/original=true/{url}.jpeg"
+    stats = entry.get("stats")
+    stats = (
+        {
+            field: stats[f"{field}AllTime"]
+            for field in STAT_FIELDS
+            if f"{field}AllTime" in stats
+        }
+        if isinstance(stats, dict)
+        else {}
+    )
+    user = entry.get("user")
+    return _image(
+        {
+            **entry,
+            "url": url,
+            "browsingLevel": 1,
+            "stats": stats,
+            "username": user.get("username", "") if isinstance(user, dict) else "",
+            "source_priority": 0,
+            "collection_ids": [ident],
+        }
+    )
+
+
+def _fetch_collections(
+    options: dict[str, Any],
+    settings: dict[str, Any],
+    ctx: dict[str, Any],
+    *,
+    allow_network: bool,
+) -> dict[str, Any]:
+    try:
+        key = _api_key(settings)
+        if not key:
+            raise FeedError(
+                "Add a Civitai API key with collection read access to use your collections."
+            )
+        ids = options.get("collections", [])
+        if (
+            not isinstance(ids, list)
+            or not 1 <= len(ids) <= 8
+            or any(
+                not isinstance(ident, str)
+                or len(ident) > 10
+                or not ident.isascii()
+                or not ident.isdecimal()
+                or not 0 < int(ident) <= 2147483647
+                for ident in ids
+            )
+        ):
+            raise FeedError("Choose between 1 and 8 own or followed image collections.")
+        negatives = _terms(options.get("negative_tags", ""), 50, "negative tags")
+        sort = options.get("sort", "Most Reactions")
+        if sort not in SORTS:
+            raise FeedError("Choose a supported Civitai sort order.")
+        refresh = float(options.get("refresh_hours", 24))
+        if not 1 <= refresh <= 168:
+            raise FeedError("Choose a collection refresh between 1 and 168 hours.")
+    except (FeedError, TypeError, ValueError) as err:
+        return {
+            "images": [],
+            "error": str(err)
+            if isinstance(err, FeedError)
+            else "Check the collection refresh setting.",
+        }
+    path = Path(ctx["data_dir"]) / "civitai-collections.json"
+    state = _load(path)
+    identity = hashlib.sha256(key.encode()).hexdigest()[:16]
+    now = time.time()
+    deadline = time.monotonic() + REFRESH_DEADLINE_S
+    feeds = []
+    changed = False
+    for ident in dict.fromkeys(ids):
+        pool_key = f"{identity}:{ident}:{sort}"
+        record = state["pools"].get(pool_key, {})
+        fresh = 0 <= now - record.get("fetched", 0) < refresh * 3600
+        remaining = deadline - time.monotonic()
+        if (
+            not fresh
+            and allow_network
+            and now >= max(state.get("retry_at", 0), record.get("retry_at", 0))
+            and remaining > 0
+        ):
+            try:
+                data = _trpc(
+                    COLLECTION_IMAGES_URL,
+                    {
+                        "collectionId": int(ident),
+                        "limit": 100,
+                        "browsingLevel": 1,
+                        "types": ["image"],
+                        "include": ["tags"],
+                        "sort": sort,
+                        "period": "AllTime",
+                    },
+                    key,
+                    timeout=min(2, remaining),
+                )
+                if not isinstance(data, dict) or not isinstance(
+                    data.get("items"), list
+                ):
+                    raise FeedError("Unreadable collection images")
+                images = [
+                    clean
+                    for entry in data["items"][:100]
+                    if (clean := _collection_image(entry, ident))
+                ]
+                record = {"images": images, "fetched": now, "attempted": now}
+                fresh = True
+            except (OSError, ValueError, TimeoutError) as err:
+                delay = _collection_retry_delay(err)
+                if isinstance(err, urllib.error.HTTPError) and err.code == 429:
+                    state["retry_at"] = now + delay
+                record = {
+                    **record,
+                    "error": "Could not load this Civitai collection. Check read access, or try again shortly.",
+                    "retry_at": now + delay,
+                    "attempted": now,
+                }
+            state["pools"][pool_key] = record
+            changed = True
+        images = _cached_images(record)
+        if negatives:
+            images = [
+                image
+                for image in images
+                if image["tags"]
+                and not any(
+                    term == str(tag["id"]) or term == tag["name"].casefold()
+                    for term in negatives
+                    for tag in image["tags"]
+                )
+            ]
+        result: dict[str, Any] = {"images": images}
+        if record.get("error"):
+            result["error"] = record["error"]
+        elif not fresh and not record.get("fetched"):
+            result["error"] = "This collection is updating. Try again shortly."
+        if not fresh and now >= max(state.get("retry_at", 0), record.get("retry_at", 0)):
+            result["live_refresh_s"] = 2
+        if images and result.get("error"):
+            result["stale"] = True
+        feeds.append((f"Collection {ident}", result))
+    if changed:
+        _save(path, state)
+    return _merge_pools(feeds)
+
+
+def _fetch_civitai(
     options: dict[str, Any],
     settings: dict[str, Any],
     ctx: dict[str, Any],
@@ -642,8 +1523,7 @@ def _fetch(
         period = options.get("period", "Week")
         if (
             match not in ("any", "all")
-            or sort
-            not in ("Most Reactions", "Most Collected", "Most Comments", "Newest")
+            or sort not in SORTS
             or period not in ("Day", "Week", "Month", "AllTime")
         ):
             raise FeedError("Choose a supported tag match, sort and period.")
@@ -654,14 +1534,7 @@ def _fetch(
         refresh = float(options.get("refresh_hours", 24))
         if not 1 <= refresh <= 168:
             raise FeedError("Choose a collection refresh between 1 and 168 hours.")
-        api_key = settings.get("api_key_secret", settings.get("api_key", ""))
-        if (
-            not isinstance(api_key, str)
-            or len(api_key) > 1000
-            or any(ord(c) < 32 for c in api_key)
-        ):
-            raise FeedError("The Civitai API key is invalid.")
-        api_key = api_key.strip()
+        api_key = _api_key(settings)
     except (FeedError, TypeError, ValueError) as err:
         return {
             "images": [],
@@ -812,9 +1685,12 @@ def _fetch(
                         sampled = True
                     saved = state["tags"].get(f"{identity}:{term}", {})
                 if not _integer(saved.get("id")):
-                    raise FeedError(
-                        f"Could not find image tag '{term}'. Add a Civitai API key in widget settings for tag lookup, or enter its numeric tag ID."
+                    hint = (
+                        "Use the exact Civitai image tag name or its numeric tag ID."
+                        if api_key
+                        else "Add a Civitai API key in widget settings for tag lookup, or enter its numeric tag ID."
                     )
+                    raise FeedError(f"Could not find image tag '{term}'. {hint}")
                 resolved.append(saved["id"])
         except FeedError as err:
             if not users:

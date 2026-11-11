@@ -93,6 +93,34 @@ def test_history_survives_module_reload_and_collection_replacement(rotation):
     assert choose([image(1, priority=0), image(99)], module=fresh)["selected_id"] == 99
 
 
+@pytest.mark.parametrize("same_post", [True, False])
+def test_recent_civitai_batch_is_deferred_across_collection_replacement(rotation, same_post):
+    _, clock, _, choose = rotation
+    posted = 1_790_000_000
+    first = {**image(1), "postId": 10, "created_at": posted}
+    similar = {
+        **image(2, priority=0),
+        "postId": 10 if same_post else 11,
+        "created_at": posted + (86400 if same_post else 120),
+    }
+    different = {**image(3), "username": "other_artist", "created_at": posted}
+    assert choose([first])["selected_id"] == 1
+    clock[0] += 3600
+    assert choose([similar, different], module=load_server())["selected_id"] == 3
+    clock[0] += 3600
+    assert choose([similar, different])["selected_id"] == 2
+
+
+def test_fresh_art_favors_new_eligible_images_without_immediate_repeats(rotation):
+    _, clock, _, choose = rotation
+    older = {**image(2), "created_at": 1_790_000_000}
+    newer = {**image(1), "created_at": 1_790_010_000}
+    options = {"prioritize_fresh": True}
+    assert choose([older, newer], options)["selected_id"] == 1
+    clock[0] += 3600
+    assert choose([older, newer], options)["selected_id"] == 2
+
+
 @pytest.mark.parametrize("changes", [{"preview": True}, {"settled": False}])
 def test_previews_and_unsettled_renders_do_not_advance_history(rotation, changes):
     _, clock, ctx, choose = rotation
