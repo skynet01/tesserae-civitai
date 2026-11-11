@@ -7,7 +7,7 @@
   "description": "Artwork from Civitai, Lexica or both. Filter by tags, creators or prompt terms, preview up to 20 matches, then rotate images that suit the cell orientation and resolution.",
   "icon": "ph-image",
   "category": "art",
-  "lineups": { "pin_option": "pinned_image", "noun": "artworks" },
+  "lineups": { "pin_option": "pinned_image" },
   "supports": {
     "sizes": [
       "sm",

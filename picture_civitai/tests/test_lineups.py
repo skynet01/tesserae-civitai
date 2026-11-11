@@ -92,7 +92,7 @@ def gallery(monkeypatch, tmp_path):
 def test_manifest_declares_pinnable_artworks(gallery):
     *_, app = gallery
     manifest = app.config["PLUGIN_REGISTRY"]["picture_civitai"].manifest
-    assert manifest["lineups"] == {"pin_option": "pinned_image", "noun": "artworks"}
+    assert manifest["lineups"] == {"pin_option": "pinned_image"}
     pin = next(
         field for field in manifest["cell_options"] if field["name"] == "pinned_image"
     )
