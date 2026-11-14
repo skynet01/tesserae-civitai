@@ -335,7 +335,10 @@ def test_collection_picker_serves_stale_choices_and_backs_off(gallery, monkeypat
     assert all(row in server.choices("collections") for row in rows)
     assert len(attempts) == 1
     settings["api_key"] = ""
-    assert "key" in server.choices("collections")[0]["label"].lower()
+    guidance = server.choices("collections")
+    assert len(guidance) == 1 and guidance[0]["value"] == ""
+    assert "key" in guidance[0]["label"].lower()
+    assert guidance[0].get("note") is True
     assert len(attempts) == 1
 
 

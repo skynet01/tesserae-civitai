@@ -623,7 +623,7 @@ def _trpc(url: str, payload: dict[str, Any], key: str, *, timeout: float = 2) ->
         raise FeedError("Civitai returned an unreadable collection response.") from None
 
 
-def choices(name: str) -> list[dict[str, str]]:
+def choices(name: str) -> list[dict[str, Any]]:
     """Own and followed image collections, cached per credential for 15 minutes."""
     from flask import current_app, has_app_context
 
@@ -646,6 +646,7 @@ def choices(name: str) -> list[dict[str, str]]:
             {
                 "value": "",
                 "label": "Add a Civitai API key with collection read access in widget settings.",
+                "note": True,
             }
         ]
     path = Path(plugin.data_dir) / "civitai-collection-choices.json"
