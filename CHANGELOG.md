@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- Add example values and clearer input formats to widget options.
 - Temporarily disable Lexica and use Civitai for saved Lexica gallery settings.
 - Size Civitai downloads to the frame, verify native image dimensions, and reduce API, cache, and render overhead.
 - Prefer different Civitai batches during rotation and add a Prioritize fresh art switch.

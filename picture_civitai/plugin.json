@@ -18,11 +18,12 @@
   "cell_options": [
     {
       "name": "pinned_image",
+      "placeholder": "12345678",
       "type": "string",
       "label": "Pinned artwork",
       "default": "",
       "advanced": true,
-      "help": "Choose an artwork using Show chosen in Lineups, or leave blank for normal rotation. A pin still obeys the frame orientation, resolution and filters. Pinned renders do not advance rotation history."
+      "help": "A numeric Civitai image ID, such as 12345678, from the image page URL (civitai.com/images/12345678). Choose an artwork using Show chosen in Lineups, or leave blank for normal rotation. A pin still obeys the frame orientation, resolution and filters. Pinned renders do not advance rotation history."
     },
     {
       "name": "sources",
@@ -47,6 +48,7 @@
     },
     {
       "name": "positive_tags",
+      "placeholder": "landscape, illustration",
       "type": "textarea",
       "label": "Include tags",
       "default": "illustration, painting",
@@ -54,16 +56,18 @@
     },
     {
       "name": "users",
+      "placeholder": "alice, bob",
       "type": "textarea",
       "label": "Creators",
       "default": "",
-      "help": "Comma- or newline-separated Civitai usernames, up to 4. Prefer artwork from these creators even without an included tag; tags provide secondary discoveries. Excluded tags and minimum engagement still apply to every image. Leave blank to discover by tags.",
+      "help": "Comma- or newline-separated Civitai usernames, up to 4. Use the profile username, without @ or a profile URL. Matching ignores case. Prefer artwork from these creators even without an included tag; tags provide secondary discoveries. Excluded tags and minimum engagement still apply to every image. Leave blank to discover by tags.",
       "show_if": {
         "sources": "creators"
       }
     },
     {
       "name": "negative_tags",
+      "placeholder": "photography, photorealistic",
       "type": "textarea",
       "label": "Exclude tags",
       "default": "photography, photorealistic",
@@ -119,26 +123,29 @@
     },
     {
       "name": "refresh_hours",
+      "placeholder": "24",
       "type": "number",
       "label": "Collection refresh (hours)",
       "default": 24,
       "min": 1,
       "max": 168,
       "advanced": true,
-      "help": "How often to fetch a new candidate pool. Tesserae must render the widget to fetch updates."
+      "help": "Whole hours between candidate-pool updates, from 1 to 168. Tesserae must render the widget to fetch updates."
     },
     {
       "name": "rotation_minutes",
+      "placeholder": "60",
       "type": "number",
       "label": "Image rotation (minutes)",
       "default": 60,
       "min": 1,
       "max": 10080,
       "advanced": true,
-      "help": "A stable image per placement and time interval, advancing through the pool without repeats. Changes appear on the next Tesserae render; this does not schedule device refreshes."
+      "help": "Whole minutes per image, from 1 to 10080. A stable image per placement and time interval, advancing through the pool without repeats. Changes appear on the next Tesserae render; this does not schedule device refreshes."
     },
     {
       "name": "repeat_days",
+      "placeholder": "7",
       "type": "number",
       "label": "Avoid repeats (days)",
       "default": 7,
@@ -169,6 +176,7 @@
     },
     {
       "name": "min_reactions",
+      "placeholder": "100",
       "type": "number",
       "label": "Minimum reactions",
       "default": 0,
@@ -179,6 +187,7 @@
     },
     {
       "name": "min_comments",
+      "placeholder": "10",
       "type": "number",
       "label": "Minimum comments",
       "default": 0,
