@@ -620,7 +620,12 @@ def _lineup_thumbnail(image: dict[str, Any], ctx: dict[str, Any]) -> str:
 
 class _ThumbnailRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
-        if not _image_url(newurl):
+        # image.civitai.com now redirects to its blob store (blobs-b2.civitai.com).
+        target = urlsplit(newurl)
+        if not (
+            _image_url(newurl)
+            or (target.scheme == "https" and target.netloc.endswith(".civitai.com"))
+        ):
             raise FeedError("Unsupported thumbnail redirect")
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 

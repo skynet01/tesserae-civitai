@@ -372,3 +372,21 @@ def test_thumbnail_download_sends_a_user_agent(monkeypatch):
     monkeypatch.setattr(server.urllib.request, "build_opener", lambda *handlers: Opener())
     assert server._thumbnail_bytes("https://image.civitai.com/x/abc/width=320/abc.jpeg") == b"jpeg"
     assert seen["ua"] and "Python-urllib" not in seen["ua"]
+
+
+def test_thumbnail_redirects_stay_on_civitai(monkeypatch):
+    """image.civitai.com answers with a redirect to blobs-b2.civitai.com; that must be followed,
+    while redirects off Civitai stay refused."""
+    folder = Path(__file__).parents[1]
+    spec = importlib.util.spec_from_file_location("lineups_civitai_redirect", folder / "server.py")
+    server = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(server)
+    import urllib.request
+
+    handler = server._ThumbnailRedirect()
+    req = urllib.request.Request("https://image.civitai.com/x/a/width=320/a.jpeg")
+    ok = handler.redirect_request(req, None, 301, "Moved", {}, "https://blobs-b2.civitai.com/file/x.jpg")
+    assert ok.full_url == "https://blobs-b2.civitai.com/file/x.jpg"
+    for bad in ("http://blobs-b2.civitai.com/x.jpg", "https://evil.example/x.jpg", "https://civitai.com.evil.example/x.jpg"):
+        with pytest.raises(server.FeedError):
+            handler.redirect_request(req, None, 301, "Moved", {}, bad)
