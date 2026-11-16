@@ -149,6 +149,10 @@ def test_choose_own_or_followed_collection_and_preview_without_tag_or_creator_se
     page.goto(f"http://preview.test{location}")
     page.locator('#panels-artboard [data-id="art"]').click()
     page.get_by_role("button", name="Configure").click()
+    daily_batch = page.get_by_role("checkbox", name="Fresh batch each day", exact=True)
+    assert not daily_batch.is_checked()
+    page.locator('label[for="src-art-opt-daily_batch"]').click()
+    assert daily_batch.is_checked()
     page.get_by_role("checkbox", name="My and followed collections", exact=True).check()
     page.get_by_role("checkbox", name="Tags", exact=True).uncheck()
     page.get_by_role("checkbox", name="Creators", exact=True).uncheck()
@@ -165,6 +169,7 @@ def test_choose_own_or_followed_collection_and_preview_without_tag_or_creator_se
     )
     assert posts[0]["opt_sources"] == ["collections"]
     assert posts[0]["opt_collections"] == [collection_id]
+    assert posts[0]["opt_daily_batch"] == ["on"]
     assert f"Collection: {label}" in page.locator(".query-preview-badges").inner_text()
     assert calls == ["/api/trpc/collection.getAllUser", "/api/trpc/image.getInfinite"]
     page.close()

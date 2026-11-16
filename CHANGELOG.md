@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- Add an optional daily batch of up to 20 fresh images, with recent batches skipped and the previous batch kept when updates fail.
 - Shorten editor labels, show number units beside inputs, and display collection setup guidance above the options.
 - Add example values and clearer input formats to widget options.
 - Temporarily disable Lexica and use Civitai for saved Lexica gallery settings.

@@ -33,6 +33,9 @@ LEXICA_ENABLED = False
 LEXICA_URL = "https://lexica.art/api/v1/search"
 LEXICA_ID = r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}"
 MAX_IMAGES = 100
+DAILY_IMAGES = 20
+DAILY_HISTORY_LIMIT = 512
+DAILY_RETRY_S = 3600
 MAX_RENDER_WAIT_S = 4.5
 REFRESH_DEADLINE_S = 4.0
 # Image tag IDs verified against Civitai tag.getAll on 2026-11-07.
@@ -475,20 +478,7 @@ def _fetch_for_placement(
     result = _fetch_pool(options, settings, ctx=ctx)
     if reactions or comments:
         images = result["images"]
-        filtered = []
-        for candidate in images:
-            if candidate.get("provider") == "lexica":
-                filtered.append(candidate)
-                continue
-            stats = candidate.get("stats", {})
-            if reactions and (
-                not all(field in stats for field in REACTION_FIELDS)
-                or sum(stats[field] for field in REACTION_FIELDS) < reactions
-            ):
-                continue
-            if comments and stats.get("commentCount", -1) < comments:
-                continue
-            filtered.append(candidate)
+        filtered = _engagement_images(images, reactions, comments)
         result = {
             **result,
             "images": filtered,
@@ -519,6 +509,26 @@ def _fetch_for_placement(
     if ctx.get("_lineup_cache_only"):
         return result
     return _select_rotation(result, options, ctx, repeat_days)
+
+
+def _engagement_images(
+    images: list[dict[str, Any]], reactions: int, comments: int
+) -> list[dict[str, Any]]:
+    filtered = []
+    for candidate in images:
+        if candidate.get("provider") == "lexica":
+            filtered.append(candidate)
+            continue
+        stats = candidate.get("stats", {})
+        if reactions and (
+            not all(field in stats for field in REACTION_FIELDS)
+            or sum(stats[field] for field in REACTION_FIELDS) < reactions
+        ):
+            continue
+        if comments and stats.get("commentCount", -1) < comments:
+            continue
+        filtered.append(candidate)
+    return filtered
 
 
 def _eligible_for_context(
@@ -1264,6 +1274,116 @@ def _fetch(
         return _merge_pools([("Civitai", civitai), ("Lexica", lexica)])
     if options.get("provider") == "lexica":
         return _fetch_lexica(options, ctx, allow_network=allow_network)
+    if options.get("daily_batch") is True:
+        return _fetch_daily(options, settings, ctx, allow_network=allow_network)
+    return _fetch_sources(options, settings, ctx, allow_network=allow_network)
+
+
+def _pool_fresh(record: dict[str, Any], now: float, hours: float, daily: bool) -> bool:
+    fetched = record.get("fetched", 0)
+    if daily:
+        try:
+            return (
+                fetched > 0
+                and datetime.fromtimestamp(fetched).date()
+                == datetime.fromtimestamp(now).date()
+            )
+        except (ValueError, OverflowError, OSError):
+            return False
+    return 0 <= now - fetched < hours * 3600
+
+
+def _fetch_daily(
+    options: dict[str, Any],
+    settings: dict[str, Any],
+    ctx: dict[str, Any],
+    *,
+    allow_network: bool,
+) -> dict[str, Any]:
+    """Freeze eligible newest art for the local day; retain old art on failures."""
+    options = {**options, "sort": "Newest", "prioritize_fresh": True}
+    ignored = {
+        "daily_batch", "sort", "prioritize_fresh", "refresh_hours", "rotation_minutes",
+        "repeat_days", "pinned_image", "show_credit", "provider",
+    }
+    try:
+        identity = hashlib.sha256(_api_key(settings).encode()).hexdigest()
+    except FeedError as err:
+        return {"images": [], "error": str(err)}
+    key = hashlib.sha256(
+        json.dumps(
+            [
+                {name: value for name, value in options.items() if name not in ignored},
+                ctx.get("cell_w"), ctx.get("cell_h"), identity,
+            ],
+            sort_keys=True,
+        ).encode()
+    ).hexdigest()
+    path = Path(ctx["data_dir"]) / "civitai-daily.json"
+    state = _load(path)
+    record = state["pools"].get(key, {})
+    images = _cached_images(record)
+    now = time.time()
+    if _pool_fresh(record, now, 24, True):
+        return {"images": images}
+    if not allow_network or now < record.get("retry_at", 0):
+        return {
+            "images": images,
+            **({"stale": True} if images else {}),
+            **({"error": record["error"]} if record.get("error") else {}),
+            **({"live_refresh_s": 2} if now >= record.get("retry_at", 0) else {}),
+        }
+    result = _fetch_sources(options, settings, ctx, allow_network=True)
+    incomplete = result.pop("_daily_incomplete", False)
+    if (
+        incomplete or result.get("error") or result.get("stale")
+        or result.get("live_refresh_s")
+    ):
+        error = (
+            result.get("error") or result.get("warning")
+            or "Could not update the daily Civitai batch."
+        )
+        state["pools"][key] = {
+            **record, "attempted": now, "retry_at": now + DAILY_RETRY_S, "error": error,
+        }
+        _save(path, state)
+        result.pop("live_refresh_s", None)
+        return {
+            **result,
+            "images": images or result["images"][:DAILY_IMAGES],
+            "error": error,
+            "stale": True,
+        }
+    seen = record.get("seen", [])
+    seen = [ident for ident in seen if _integer(ident)] if isinstance(seen, list) else []
+    recent = set(seen) | {image["id"] for image in images}
+    candidates = _eligible_for_context(
+        _engagement_images(
+            result["images"],
+            _minimum(options.get("min_reactions", 0), "reactions"),
+            _minimum(options.get("min_comments", 0), "comments"),
+        ),
+        options,
+        ctx,
+    )
+    candidates.sort(key=lambda image: image.get("created_at", 0), reverse=True)
+    batch = [image for image in candidates if image["id"] not in recent][:DAILY_IMAGES]
+    state["pools"][key] = {
+        "images": batch or images,
+        "seen": [*seen, *(image["id"] for image in batch)][-DAILY_HISTORY_LIMIT:],
+        "fetched": now, "attempted": now,
+    }
+    _save(path, state)
+    return {**result, "images": batch or images}
+
+
+def _fetch_sources(
+    options: dict[str, Any],
+    settings: dict[str, Any],
+    ctx: dict[str, Any],
+    *,
+    allow_network: bool,
+) -> dict[str, Any]:
     if options.get("prioritize_fresh") is True:
         options = {**options, "sort": "Newest"}
     sources = options.get("sources", ["tags", "creators"])
@@ -1297,7 +1417,14 @@ def _fetch(
             "images": [],
             "error": "Choose at least one artwork source, and enter creators when using only Creators.",
         }
-    return feeds[0][1] if len(feeds) == 1 else _merge_pools(feeds)
+    result = feeds[0][1] if len(feeds) == 1 else _merge_pools(feeds)
+    if options.get("daily_batch") is True and any(
+        feed.get("error") or feed.get("stale") or feed.get("live_refresh_s")
+        or feed.get("_daily_incomplete")
+        for _, feed in feeds
+    ):
+        result["_daily_incomplete"] = True
+    return result
 
 
 def _merge_pools(feeds: list[tuple[str, dict[str, Any]]]) -> dict[str, Any]:
@@ -1430,9 +1557,10 @@ def _fetch_collections(
     feeds = []
     changed = False
     for ident in dict.fromkeys(ids):
-        pool_key = f"{identity}:{ident}:{sort}"
+        daily = options.get("daily_batch") is True
+        pool_key = f"{identity}:{ident}:{sort}" + (":daily" if daily else "")
         record = state["pools"].get(pool_key, {})
-        fresh = 0 <= now - record.get("fetched", 0) < refresh * 3600
+        fresh = _pool_fresh(record, now, refresh, daily)
         remaining = deadline - time.monotonic()
         if (
             not fresh
@@ -1502,7 +1630,13 @@ def _fetch_collections(
         feeds.append((f"Collection {ident}", result))
     if changed:
         _save(path, state)
-    return _merge_pools(feeds)
+    result = _merge_pools(feeds)
+    if options.get("daily_batch") is True and any(
+        feed.get("error") or feed.get("stale") or feed.get("live_refresh_s")
+        for _, feed in feeds
+    ):
+        result["_daily_incomplete"] = True
+    return result
 
 
 def _fetch_civitai(
@@ -1561,14 +1695,16 @@ def _fetch_civitai(
             ]
         ).encode()
     ).hexdigest()
+    daily = options.get("daily_batch") is True
+    if daily:
+        key += ":daily"
     path = Path(ctx["data_dir"]) / "civitai-cache.json"
     state = _load(path)
     record = state["pools"].get(key, {})
     if not isinstance(record, dict):
         record = {}
     images = _cached_images(record)
-    fetched = record.get("fetched", 0)
-    if isinstance(fetched, (int, float)) and 0 <= now - fetched < refresh * 3600:
+    if _pool_fresh(record, now, refresh, daily):
         return {
             "images": images,
             **(

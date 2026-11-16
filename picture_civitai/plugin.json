@@ -158,6 +158,13 @@
       "help": "Prefer artwork not shown here within this window, including Civitai variants from the same post or from the same creator within five minutes. Use a whole number. Set 0 to disable repeat avoidance. If the pool is small, variants or repeats can appear sooner."
     },
     {
+      "name": "daily_batch",
+      "type": "boolean",
+      "label": "Fresh batch each day",
+      "default": false,
+      "help": "Use up to 20 new images for the day, skip recent batches, and keep the previous batch if no fresh artwork is available."
+    },
+    {
       "name": "prioritize_fresh",
       "type": "boolean",
       "label": "Prioritize fresh art",
