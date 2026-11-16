@@ -600,10 +600,102 @@ def lineup_items(
             else f"Lexica / {image.get('prompt', '')[:120]}"
             if image.get("provider") == "lexica"
             else f"Artwork {image['id']}",
-            "thumb": _thumbnail(image, 320),
+            "thumb": _lineup_thumbnail(image, context),
         }
         for image in images[:MAX_IMAGES]
     ]
+
+
+def _lineup_thumbnail(image: dict[str, Any], ctx: dict[str, Any]) -> str:
+    if image.get("provider") == "lexica":
+        return _thumbnail(image, 320)
+    width, height = ctx.get("cell_w"), ctx.get("cell_h")
+    if not _integer(width) or not _integer(height):
+        return _thumbnail(image, 320)
+    scale = 320 / max(width, height)
+    w, h = max(1, round(width * scale)), max(1, round(height * scale))
+    key = hashlib.sha256(image["url"].encode()).hexdigest()
+    return f"/plugins/picture_civitai/lineup-thumb/{key}/{w}x{h}.jpg"
+
+
+class _ThumbnailRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if not _image_url(newurl):
+            raise FeedError("Unsupported thumbnail redirect")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _thumbnail_bytes(url: str) -> bytes:
+    if not _image_url(url):
+        raise FeedError("Unsupported thumbnail URL")
+    opener = urllib.request.build_opener(
+        urllib.request.ProxyHandler({}), _ThumbnailRedirect()
+    )
+    with opener.open(url, timeout=2) as response:
+        raw = response.read(MAX_CACHE_BYTES + 1)
+    if len(raw) > MAX_CACHE_BYTES:
+        raise FeedError("Thumbnail exceeds byte cap")
+    return raw
+
+
+def blueprint():
+    """Cell-shaped previews; only image bytes are downloaded, never gallery data."""
+    from flask import Blueprint, abort, current_app, send_file
+    from PIL import Image, ImageOps
+
+    bp = Blueprint("civitai_thumbnails", __name__)
+
+    @bp.get("/lineup-thumb/<key>/<int:w>x<int:h>.jpg")
+    def thumbnail(key: str, w: int, h: int):
+        if not re.fullmatch(r"[a-f0-9]{64}", key) or min(w, h) < 1 or max(w, h) != 320:
+            abort(404)
+        plugin = current_app.config["PLUGIN_REGISTRY"].get("picture_civitai")
+        data_dir = Path(plugin.data_dir)
+        cached = data_dir / "lineup-thumbnails" / f"{key}-{w}x{h}.jpg"
+        if not cached.is_file():
+            image = None
+            for filename in (
+                "civitai-cache.json",
+                "civitai-collections.json",
+                "civitai-daily.json",
+            ):
+                for record in _load(data_dir / filename)["pools"].values():
+                    image = next(
+                        (
+                            entry
+                            for entry in _cached_images(record)
+                            if hashlib.sha256(entry["url"].encode()).hexdigest() == key
+                        ),
+                        None,
+                    )
+                    if image is not None:
+                        break
+                if image is not None:
+                    break
+            if image is None:
+                abort(404)
+            try:
+                raw = _thumbnail_bytes(_thumbnail(image, 320))
+                with Image.open(io.BytesIO(raw)) as source:
+                    cropped = ImageOps.fit(
+                        ImageOps.exif_transpose(source).convert("RGB"), (w, h)
+                    )
+                    output = io.BytesIO()
+                    cropped.save(output, "JPEG", quality=85)
+                cached.parent.mkdir(parents=True, exist_ok=True)
+                with tempfile.NamedTemporaryFile(
+                    dir=cached.parent, delete=False
+                ) as temp:
+                    temp.write(output.getvalue())
+                    temporary = Path(temp.name)
+                temporary.replace(cached)
+            except (OSError, ValueError, FeedError):
+                abort(502)
+        return send_file(
+            io.BytesIO(cached.read_bytes()), mimetype="image/jpeg", max_age=86400
+        )
+
+    return bp
 
 
 def _api_key(settings: dict[str, Any]) -> str:
@@ -1303,25 +1395,59 @@ def _fetch_daily(
     """Freeze eligible newest art for the local day; retain old art on failures."""
     options = {**options, "sort": "Newest", "prioritize_fresh": True}
     ignored = {
-        "daily_batch", "sort", "prioritize_fresh", "refresh_hours", "rotation_minutes",
-        "repeat_days", "pinned_image", "show_credit", "provider",
+        "daily_batch",
+        "sort",
+        "prioritize_fresh",
+        "refresh_hours",
+        "rotation_minutes",
+        "repeat_days",
+        "pinned_image",
+        "show_credit",
+        "provider",
     }
     try:
         identity = hashlib.sha256(_api_key(settings).encode()).hexdigest()
     except FeedError as err:
         return {"images": [], "error": str(err)}
-    key = hashlib.sha256(
-        json.dumps(
-            [
-                {name: value for name, value in options.items() if name not in ignored},
-                ctx.get("cell_w"), ctx.get("cell_h"), identity,
-            ],
-            sort_keys=True,
-        ).encode()
-    ).hexdigest()
+
+    def cache_key(filters):
+        return hashlib.sha256(
+            json.dumps(
+                [
+                    filters,
+                    ctx.get("cell_w"),
+                    ctx.get("cell_h"),
+                    identity,
+                ],
+                sort_keys=True,
+            ).encode()
+        ).hexdigest()
+
+    filters = {name: value for name, value in options.items() if name not in ignored}
+    legacy_key = cache_key(filters)
+    # Renderers can inject location and other host metadata. Only artwork
+    # filters belong in this key, so Lineups finds the render's frozen batch.
+    names = {
+        "sources",
+        "collections",
+        "positive_tags",
+        "negative_tags",
+        "users",
+        "orientation",
+        "resolution",
+        "scale",
+        "tag_match",
+        "min_reactions",
+        "min_comments",
+        "period",
+    }
+    key = cache_key({name: value for name, value in filters.items() if name in names})
     path = Path(ctx["data_dir"]) / "civitai-daily.json"
     state = _load(path)
-    record = state["pools"].get(key, {})
+    record = state["pools"].get(key, state["pools"].get(legacy_key, {}))
+    if record and key not in state["pools"] and not ctx.get("_lineup_cache_only"):
+        state["pools"][key] = record
+        _save(path, state)
     images = _cached_images(record)
     now = time.time()
     if _pool_fresh(record, now, 24, True):
@@ -1336,15 +1462,21 @@ def _fetch_daily(
     result = _fetch_sources(options, settings, ctx, allow_network=True)
     incomplete = result.pop("_daily_incomplete", False)
     if (
-        incomplete or result.get("error") or result.get("stale")
+        incomplete
+        or result.get("error")
+        or result.get("stale")
         or result.get("live_refresh_s")
     ):
         error = (
-            result.get("error") or result.get("warning")
+            result.get("error")
+            or result.get("warning")
             or "Could not update the daily Civitai batch."
         )
         state["pools"][key] = {
-            **record, "attempted": now, "retry_at": now + DAILY_RETRY_S, "error": error,
+            **record,
+            "attempted": now,
+            "retry_at": now + DAILY_RETRY_S,
+            "error": error,
         }
         _save(path, state)
         result.pop("live_refresh_s", None)
@@ -1355,7 +1487,9 @@ def _fetch_daily(
             "stale": True,
         }
     seen = record.get("seen", [])
-    seen = [ident for ident in seen if _integer(ident)] if isinstance(seen, list) else []
+    seen = (
+        [ident for ident in seen if _integer(ident)] if isinstance(seen, list) else []
+    )
     recent = set(seen) | {image["id"] for image in images}
     candidates = _eligible_for_context(
         _engagement_images(
@@ -1371,7 +1505,8 @@ def _fetch_daily(
     state["pools"][key] = {
         "images": batch or images,
         "seen": [*seen, *(image["id"] for image in batch)][-DAILY_HISTORY_LIMIT:],
-        "fetched": now, "attempted": now,
+        "fetched": now,
+        "attempted": now,
     }
     _save(path, state)
     return {**result, "images": batch or images}

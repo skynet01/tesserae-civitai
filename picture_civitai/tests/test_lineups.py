@@ -92,7 +92,7 @@ def gallery(monkeypatch, tmp_path):
 def test_manifest_declares_pinnable_artworks(gallery):
     *_, app = gallery
     manifest = app.config["PLUGIN_REGISTRY"]["picture_civitai"].manifest
-    assert manifest["lineups"] == {"pin_option": "pinned_image"}
+    assert manifest["lineups"] == {"pin_option": "pinned_image", "noun": "artworks"}
     pin = next(
         field for field in manifest["cell_options"] if field["name"] == "pinned_image"
     )
@@ -112,7 +112,8 @@ def test_listing_uses_frame_eligibility_and_cached_filters_without_network_or_hi
     listed = server.lineup_items({**options, "pinned_image": "6"}, ctx=ctx)
     assert [item["key"] for item in listed] == ["1", "6"]
     assert listed[0]["label"] == "alice / 1"
-    assert listed[0]["thumb"] == "https://image.civitai.com/token/1/width=320/art.png"
+    assert listed[0]["thumb"].startswith("/plugins/picture_civitai/lineup-thumb/")
+    assert listed[0]["thumb"].endswith("/320x180.jpg")
     assert server.lineup_items({**options, "min_reactions": 1000}, ctx=ctx) == []
     assert (
         server.lineup_items(options, ctx={**ctx, "cell_w": 2160, "cell_h": 3840})[0][
@@ -122,6 +123,69 @@ def test_listing_uses_frame_eligibility_and_cached_filters_without_network_or_hi
     )
     assert len(calls) == before and cache.read_bytes() == original
     assert not (cache.parent / "civitai-history.json").exists()
+
+
+def test_daily_lineup_listing_reuses_render_cache_with_injected_location(gallery):
+    server, options, settings, ctx, calls, _ = gallery
+    options = {**options, "daily_batch": True}
+    server.fetch(
+        {**options, "latitude": 40.0, "longitude": -75.0, "label": "Test location"},
+        settings,
+        ctx={**ctx, "preview": True},
+    )
+    before = len(calls)
+    assert [item["key"] for item in server.lineup_items(options, ctx=ctx)] == ["1", "6"]
+    assert len(calls) == before
+
+
+def test_portrait_lineup_thumbnails_follow_cell_shape_and_exclude_landscape(gallery):
+    server, options, _, ctx, _, _ = gallery
+    listed = server.lineup_items(options, ctx={**ctx, "cell_w": 2160, "cell_h": 3840})
+    assert [item["key"] for item in listed] == ["2"]
+    assert listed[0]["thumb"].startswith("/plugins/picture_civitai/lineup-thumb/")
+    assert listed[0]["thumb"].endswith("/180x320.jpg")
+
+
+def test_lineup_thumbnail_is_cropped_once_without_api_requests(gallery, monkeypatch):
+    import io
+
+    from PIL import Image
+
+    server, options, _, ctx, calls, app = gallery
+    app.register_blueprint(server.blueprint(), url_prefix="/plugins/picture_civitai")
+    listed = server.lineup_items(options, ctx={**ctx, "cell_w": 2160, "cell_h": 3840})
+    source = io.BytesIO()
+    Image.new("RGB", (300, 500), "#638064").save(source, "JPEG")
+    downloads = []
+
+    def download(url):
+        downloads.append(url)
+        return source.getvalue()
+
+    monkeypatch.setattr(server, "_thumbnail_bytes", download)
+    before = len(calls)
+    client = app.test_client()
+    for _ in range(2):
+        response = client.get(listed[0]["thumb"])
+        assert response.status_code == 200
+        with Image.open(io.BytesIO(response.data)) as image:
+            assert image.size == (180, 320)
+            assert image.getpixel((0, 0)) != (0, 0, 0)
+    assert len(downloads) == 1 and len(calls) == before
+
+
+def test_lineup_thumbnail_rejects_unknown_images_and_unbounded_sizes(gallery):
+    server, options, _, ctx, _, app = gallery
+    app.register_blueprint(server.blueprint(), url_prefix="/plugins/picture_civitai")
+    url = server.lineup_items(options, ctx=ctx)[0]["thumb"]
+    client = app.test_client()
+    assert client.get(url.replace("320x180", "3200x1800")).status_code == 404
+    assert (
+        client.get(
+            "/plugins/picture_civitai/lineup-thumb/unknown/320x180.jpg"
+        ).status_code
+        == 404
+    )
 
 
 def test_listing_uses_manifest_defaults_and_isolates_credentials(gallery):

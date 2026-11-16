@@ -166,6 +166,26 @@ def test_cache_only_listing_never_builds_a_daily_batch(daily):
     assert calls == []
 
 
+def test_existing_batch_with_host_location_migrates_without_refetch(daily, monkeypatch):
+    import hashlib
+
+    server, _, calls, _, options, ctx, _ = daily
+    original = server.fetch(options, {}, ctx=ctx)
+    path = Path(ctx["data_dir"]) / "civitai-daily.json"
+    state = json.loads(path.read_text())
+    record = next(iter(state["pools"].values()))
+    host_fields = {"latitude": 40.0, "longitude": -75.0, "label": "Test location"}
+    legacy_key = hashlib.sha256(json.dumps(
+        [host_fields, ctx["cell_w"], ctx["cell_h"], hashlib.sha256(b"").hexdigest()],
+        sort_keys=True,
+    ).encode()).hexdigest()
+    path.write_text(json.dumps({"pools": {legacy_key: record}}))
+    monkeypatch.setattr(server, "fetch_json", lambda *a, **k: pytest.fail("Refetched an existing batch"))
+    assert ids(server.fetch({**options, **host_fields}, {}, ctx=ctx)) == ids(original)
+    assert ids(server.fetch(options, {}, ctx={**ctx, "_lineup_cache_only": True})) == ids(original)
+    assert len(calls) == 1
+
+
 @pytest.mark.parametrize("mixed", [False, True])
 def test_daily_collections_refresh_at_midnight_and_keep_batch_on_partial_failure(
     daily, monkeypatch, mixed
