@@ -343,3 +343,32 @@ def test_combined_galleries_list_and_pin_from_cache_without_changing_history(
     assert pinned["selected_id"] == f"lexica:{ident}"
     assert len(pinned["images"]) == 1
     assert not (Path(ctx["data_dir"]) / "civitai-history.json").exists()
+
+
+def test_thumbnail_download_sends_a_user_agent(monkeypatch):
+    """Civitai's image CDN answers 403 to urllib's default User-Agent, which left every lineup
+    preview as a "?" placeholder."""
+    folder = Path(__file__).parents[1]
+    spec = importlib.util.spec_from_file_location("lineups_civitai_ua", folder / "server.py")
+    server = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(server)
+    seen = {}
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self, n):
+            return b"jpeg"
+
+    class Opener:
+        def open(self, request, timeout):
+            seen["ua"] = request.get_header("User-agent")
+            return Response()
+
+    monkeypatch.setattr(server.urllib.request, "build_opener", lambda *handlers: Opener())
+    assert server._thumbnail_bytes("https://image.civitai.com/x/abc/width=320/abc.jpeg") == b"jpeg"
+    assert seen["ua"] and "Python-urllib" not in seen["ua"]

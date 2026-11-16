@@ -631,7 +631,9 @@ def _thumbnail_bytes(url: str) -> bytes:
     opener = urllib.request.build_opener(
         urllib.request.ProxyHandler({}), _ThumbnailRedirect()
     )
-    with opener.open(url, timeout=2) as response:
+    # Civitai's image CDN answers 403 to urllib's default User-Agent.
+    request = urllib.request.Request(url, headers={"User-Agent": "tesserae (+picture_civitai)"})
+    with opener.open(request, timeout=2) as response:
         raw = response.read(MAX_CACHE_BYTES + 1)
     if len(raw) > MAX_CACHE_BYTES:
         raise FeedError("Thumbnail exceeds byte cap")
