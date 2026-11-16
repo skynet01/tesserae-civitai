@@ -2,7 +2,12 @@
 
 ## [Unreleased]
 
+## 0.2.4
+
 - Restore Lineups browsing for daily batches and fit cached artwork previews to the target cell.
+- Lineups thumbnails load again: requests send a User-Agent and follow Civitai's image redirect.
+
+## 0.2.3 and earlier
 
 - Add an optional daily batch of up to 20 fresh images, with recent batches skipped and the previous batch kept when updates fail.
 - Shorten editor labels, show number units beside inputs, and display collection setup guidance above the options.
