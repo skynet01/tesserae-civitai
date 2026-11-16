@@ -1,8 +1,8 @@
 {
   "tesserae_compat": "1.x",
-  "tesserae_min": "0.484.1",
+  "tesserae_min": "0.512.0",
   "name": "Picture, AI galleries",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "kind": "widget",
   "description": "Artwork from Civitai. Filter by tags, creators or collections, preview up to 20 matches, then rotate images that suit the cell orientation and resolution.",
   "icon": "ph-image",

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+## 0.2.5
+
+- Needs Tesserae 0.512.0 or newer, which reads the Lineups item name this widget declares.
+
 ## 0.2.4
 
 - Restore Lineups browsing for daily batches and fit cached artwork previews to the target cell.
